@@ -1,0 +1,32 @@
+name: Feature proposal
+description: Propose a Project Master capability or subsystem change
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What failure or limitation does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: epistemic
+    attributes:
+      label: Epistemic impact
+      description: How does this improve reliability, provenance, calibration, or verification?
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed design
+    validations:
+      required: true
+  - type: textarea
+    id: completion
+    attributes:
+      label: Completion evidence
+      description: What would prove the feature works?
+    validations:
+      required: true

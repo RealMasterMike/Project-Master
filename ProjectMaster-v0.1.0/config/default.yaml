@@ -1,0 +1,11 @@
+model: qwen3:8b
+ollama_url: http://127.0.0.1:11434
+temperature: 0.3
+num_ctx: 32768
+max_tool_rounds: 6
+max_history_messages: 30
+db_path: master.db
+workspace_root: workspace
+allow_file_writes: false
+self_review: false
+request_timeout_seconds: 180

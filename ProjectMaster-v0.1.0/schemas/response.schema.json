@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://projectmaster.local/schemas/response.schema.json",
+  "title": "Epistemic Assessment",
+  "type": "object",
+  "required": ["answer", "confidence"],
+  "properties": {
+    "answer": {"type": "string"},
+    "verified_information": {"type": "array", "items": {"type": "string"}},
+    "source_claims": {"type": "array", "items": {"type": "string"}},
+    "inferences": {"type": "array", "items": {"type": "string"}},
+    "speculation": {"type": "array", "items": {"type": "string"}},
+    "missing_information": {"type": "array", "items": {"type": "string"}},
+    "confidence": {"enum": ["very low", "low", "moderate", "high", "very high"]},
+    "revision_conditions": {"type": "array", "items": {"type": "string"}}
+  }
+}

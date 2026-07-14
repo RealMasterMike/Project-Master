@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://projectmaster.local/schemas/task.schema.json",
+  "title": "Project Master Task",
+  "type": "object",
+  "required": ["title", "objective", "status", "steps", "completion_evidence"],
+  "properties": {
+    "id": {"type": "string"},
+    "title": {"type": "string"},
+    "objective": {"type": "string"},
+    "status": {"enum": ["planned", "active", "blocked", "complete", "cancelled"]},
+    "constraints": {"type": "array", "items": {"type": "string"}},
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["description", "status"],
+        "properties": {
+          "description": {"type": "string"},
+          "status": {"enum": ["pending", "active", "blocked", "complete"]}
+        }
+      }
+    },
+    "required_tools": {"type": "array", "items": {"type": "string"}},
+    "completion_evidence": {"type": "array", "items": {"type": "string"}},
+    "risks": {"type": "array", "items": {"type": "string"}},
+    "rollback_plan": {"type": "string"}
+  }
+}

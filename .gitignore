@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.firecrawl/
+.env
+*.db
+*.db-shm
+*.db-wal
+*.zip
+release/
+src-tauri/target/
+
+# Python environments, caches, and generated packages
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+*.egg-info/
+*.sqlite
+*.sqlite3
+
+# Local user workspace content
+ProjectMaster-v0.1.0/workspace/*
+!ProjectMaster-v0.1.0/workspace/.gitkeep
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
