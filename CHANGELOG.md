@@ -2,6 +2,24 @@
 
 All notable Project Master desktop releases are recorded here.
 
+## 0.2.0 ALPHA — 2026-07-14
+
+### Added
+
+- Added the Conversation Library: create a clean session, reopen saved conversations, and review
+  their locally stored message history from a persistent workspace sidebar.
+- Added a grounded first-session intake and a literal capability contract for Project Master.
+
+### Changed
+
+- Replaced generic, overly theatrical assistant behavior with a calmer default voice. Unprompted
+  emojis, hype, glitter, magic, space, aliens, and whimsical roleplay are now discouraged.
+
+### Verification
+
+- Frontend conversation protocol tests, prompt-contract tests, memory-authorization tests, and the
+  frontend production build passed before packaging.
+
 ## Release gate
 
 No build may be uploaded or published unless all of the following are complete:
@@ -22,7 +40,7 @@ per-version changelog or release-note files to the default branch. Version-speci
 the matching GitHub Release; historical tags preserve the repository exactly as it existed for that
 release.
 
-## Unreleased
+## 0.1.3 ALPHA — 2026-07-14
 
 ### Added
 
@@ -39,12 +57,25 @@ release.
   Ollama response and releases the provider before another prompt begins.
 - Durable memory can no longer be created from ordinary or exploratory chat by a model tool call;
   a user must explicitly ask Project Master to remember, save, or store the information.
+- The desktop app now rejects a mismatched backend already using its local port instead of silently
+  attaching a newer interface to an older backend and failing chat requests.
 
 ### Repository maintenance
 
 - Removed obsolete build handoffs, portable AI prompts, duplicate release-note files, and stale task
   tracking documents from the default branch.
 - Consolidated release history into this rolling changelog.
+
+### Known issues
+
+- Ollama and at least one compatible local model are still required.
+- Windows installers are not code-signed and may trigger a Microsoft reputation warning.
+- Tool, memory, evidence, settings, and conversation-management interfaces are not built yet.
+
+### Verification
+
+- Targeted memory-authorization tests and layout/client protocol tests passed before the release build.
+- Frontend production build, packaged backend build, and Windows NSIS/MSI installer builds passed.
 
 ## 0.1.1 ALPHA — 2026-07-14
 

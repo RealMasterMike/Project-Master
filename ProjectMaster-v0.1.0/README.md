@@ -1,4 +1,4 @@
-# Project Master v0.1.1
+# Project Master v0.2.0
 
 [Master Mike on YouTube](https://www.youtube.com/@RealMasterMike?sub_confirmation=1) ·
 [Creator links](https://linktr.ee/realmastermike) ·
@@ -6,7 +6,7 @@
 
 Project Master is a local-first AI framework designed around **epistemic reliability**: the assistant should represent reality as accurately as the available evidence allows, clearly separate facts from claims and inference, calibrate confidence, and revise conclusions when better evidence appears.
 
-Version 0.1.1 is a runnable command-line MVP and packaged desktop engine built for Ollama. It includes:
+Version 0.2.0 is a runnable command-line MVP and packaged desktop engine built for Ollama. It includes:
 
 - an epistemic system prompt and project constitution;
 - an Ollama chat provider with tool-call support;

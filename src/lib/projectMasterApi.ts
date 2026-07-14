@@ -9,6 +9,18 @@ const STATUS_TIMEOUT_MS = 8_000;
 
 export interface ProjectMasterModel { name: string; }
 
+export interface ProjectMasterConversation {
+  id: string;
+  startedAt: string;
+  title: string | null;
+  messageCount: number;
+}
+
+export interface ProjectMasterConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 interface ModelStatus {
   configured_model: string;
   num_ctx: number;
@@ -31,6 +43,20 @@ interface StreamEvent {
   content?: unknown;
   conversation_id?: unknown;
   error?: unknown;
+}
+
+interface ConversationListResponse {
+  conversations: Array<{
+    id?: unknown;
+    started_at?: unknown;
+    title?: unknown;
+    message_count?: unknown;
+  }>;
+}
+
+interface ConversationResponse {
+  id?: unknown;
+  messages?: Array<{ role?: unknown; content?: unknown }>;
 }
 
 export class ProjectMasterUnavailableError extends Error {
@@ -138,6 +164,60 @@ export async function getModelStatus(signal?: AbortSignal): Promise<{
     window.clearTimeout(timeout);
     signal?.removeEventListener("abort", forwardAbort);
   }
+}
+
+export async function listConversations(
+  signal?: AbortSignal,
+): Promise<ProjectMasterConversation[]> {
+  const response = await request("/conversations?limit=50", { signal });
+  await ensureSuccess(response);
+  const payload = (await response.json()) as ConversationListResponse;
+  if (!Array.isArray(payload.conversations)) {
+    throw new ProjectMasterProtocolError("Project Master returned invalid conversation data.");
+  }
+  return payload.conversations.map((conversation) => {
+    if (
+      typeof conversation.id !== "string" ||
+      typeof conversation.started_at !== "string" ||
+      (conversation.title !== null && typeof conversation.title !== "string") ||
+      typeof conversation.message_count !== "number"
+    ) {
+      throw new ProjectMasterProtocolError("Project Master returned an invalid conversation.");
+    }
+    return {
+      id: conversation.id,
+      startedAt: conversation.started_at,
+      title: conversation.title,
+      messageCount: conversation.message_count,
+    };
+  });
+}
+
+export async function getConversation(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<{ id: string; messages: ProjectMasterConversationMessage[] }> {
+  const response = await request(`/conversations/${encodeURIComponent(conversationId)}`, {
+    signal,
+  });
+  await ensureSuccess(response);
+  const payload = (await response.json()) as ConversationResponse;
+  if (typeof payload.id !== "string" || !Array.isArray(payload.messages)) {
+    throw new ProjectMasterProtocolError("Project Master returned an invalid conversation.");
+  }
+  const messages = payload.messages.map((message) => {
+    if (
+      (message.role !== "user" && message.role !== "assistant") ||
+      typeof message.content !== "string"
+    ) {
+      throw new ProjectMasterProtocolError("Project Master returned an invalid conversation message.");
+    }
+    return {
+      role: message.role as ProjectMasterConversationMessage["role"],
+      content: message.content,
+    };
+  });
+  return { id: payload.id, messages };
 }
 
 function parseEvent(line: string, options: StreamChatOptions): boolean {

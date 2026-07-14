@@ -5,7 +5,13 @@ const { fetchMock } = vi.hoisted(() => ({ fetchMock: vi.fn() }));
 vi.mock("@tauri-apps/plugin-http", () => ({ fetch: fetchMock }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
-import { API_BASE_URL, cancelChat, streamChat } from "./projectMasterApi";
+import {
+  API_BASE_URL,
+  cancelChat,
+  getConversation,
+  listConversations,
+  streamChat,
+} from "./projectMasterApi";
 
 describe("Project Master stream cancellation protocol", () => {
   beforeEach(() => fetchMock.mockReset());
@@ -51,5 +57,56 @@ describe("Project Master stream cancellation protocol", () => {
     expect(url).toBe(`${API_BASE_URL}/chat/cancel`);
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({ request_id: "request-123" });
+  });
+
+  it("loads and validates saved conversations", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          conversations: [
+            {
+              id: "conversation-1",
+              started_at: "2026-07-14T12:00:00Z",
+              title: "First session",
+              message_count: 2,
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "conversation-1",
+          messages: [
+            { role: "user", content: "Hello" },
+            { role: "assistant", content: "Hi" },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(listConversations()).resolves.toEqual([
+      {
+        id: "conversation-1",
+        startedAt: "2026-07-14T12:00:00Z",
+        title: "First session",
+        messageCount: 2,
+      },
+    ]);
+    await expect(getConversation("conversation-1")).resolves.toEqual({
+      id: "conversation-1",
+      messages: [
+        { role: "user", content: "Hello" },
+        { role: "assistant", content: "Hi" },
+      ],
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `${API_BASE_URL}/conversations?limit=50`,
+      `${API_BASE_URL}/conversations/conversation-1`,
+    ]);
   });
 });

@@ -11,14 +11,18 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
+import { ConversationLibrary } from "./components/ConversationLibrary";
 import { LayoutCustomizer } from "./components/LayoutCustomizer";
 import { useLayoutController } from "./hooks/useLayoutController";
 import {
   cancelChat,
   ensureManagedBackend,
   formatProjectMasterError,
+  getConversation,
   getModelStatus,
   isAbortError,
+  listConversations,
+  type ProjectMasterConversation,
   ProjectMasterUnavailableError,
   streamChat,
   type ProjectMasterModel,
@@ -58,6 +62,9 @@ function App() {
   const [models, setModels] = useState<ProjectMasterModel[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [conversationId, setConversationId] = useState<string>();
+  const [conversations, setConversations] = useState<ProjectMasterConversation[]>([]);
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationError, setConversationError] = useState<string | null>(null);
   const [contextLength, setContextLength] = useState(32768);
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("checking");
@@ -67,10 +74,34 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false);
 
   const modelLoadControllerRef = useRef<AbortController | null>(null);
+  const conversationListControllerRef = useRef<AbortController | null>(null);
+  const conversationLoadControllerRef = useRef<AbortController | null>(null);
   const streamControllerRef = useRef<ActiveStream | null>(null);
   const retryRequestsRef = useRef(new Map<string, RetryRequest>());
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const loadConversations = useCallback(async () => {
+    conversationListControllerRef.current?.abort();
+    const controller = new AbortController();
+    conversationListControllerRef.current = controller;
+    setConversationLoading(true);
+    setConversationError(null);
+
+    try {
+      const availableConversations = await listConversations(controller.signal);
+      if (!controller.signal.aborted) setConversations(availableConversations);
+    } catch (error) {
+      if (!controller.signal.aborted && !isAbortError(error)) {
+        setConversationError(formatProjectMasterError(error));
+      }
+    } finally {
+      if (conversationListControllerRef.current === controller) {
+        conversationListControllerRef.current = null;
+        setConversationLoading(false);
+      }
+    }
+  }, []);
 
   const loadAvailableModels = useCallback(async () => {
     modelLoadControllerRef.current?.abort();
@@ -129,8 +160,14 @@ function App() {
 
     return () => {
       modelLoadControllerRef.current?.abort();
+      conversationListControllerRef.current?.abort();
+      conversationLoadControllerRef.current?.abort();
     };
   }, [loadAvailableModels]);
+
+  useEffect(() => {
+    if (connectionState === "ready") void loadConversations();
+  }, [connectionState, loadConversations]);
 
   useEffect(() => {
     return () => {
@@ -224,6 +261,7 @@ function App() {
         }
       }
     } finally {
+      void loadConversations();
       if (streamControllerRef.current?.controller === controller) {
         streamControllerRef.current = null;
         setIsStreaming(false);
@@ -306,6 +344,46 @@ function App() {
     void cancelChat(activeStream.requestId).catch(() => undefined);
   }
 
+  function startNewSession(): void {
+    if (isStreaming) return;
+    setConversationId(undefined);
+    setMessages([]);
+    setComposer("");
+    resetComposerHeight();
+  }
+
+  async function openConversation(id: string): Promise<void> {
+    if (isStreaming || id === conversationId) return;
+    conversationLoadControllerRef.current?.abort();
+    const controller = new AbortController();
+    conversationLoadControllerRef.current = controller;
+    setConversationLoading(true);
+    setConversationError(null);
+
+    try {
+      const conversation = await getConversation(id, controller.signal);
+      if (controller.signal.aborted) return;
+      setConversationId(conversation.id);
+      setMessages(
+        conversation.messages.map((message) => ({
+          id: createMessageId(message.role),
+          role: message.role,
+          content: message.content,
+          status: "complete",
+        })),
+      );
+    } catch (error) {
+      if (!controller.signal.aborted && !isAbortError(error)) {
+        setConversationError(formatProjectMasterError(error));
+      }
+    } finally {
+      if (conversationLoadControllerRef.current === controller) {
+        conversationLoadControllerRef.current = null;
+        setConversationLoading(false);
+      }
+    }
+  }
+
   async function retryMessage(messageId: string): Promise<void> {
     if (isStreaming) {
       return;
@@ -365,7 +443,7 @@ function App() {
           />
           <span className="brand-copy">
             <span className="brand-name">MASTER</span>
-            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.1.1</span>
+            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.2.0</span>
           </span>
         </div>
 
@@ -429,6 +507,16 @@ function App() {
       </header>
 
       <div className="workspace-shell" style={workspaceStyle}>
+        <ConversationLibrary
+          conversations={conversations}
+          activeConversationId={conversationId}
+          isBusy={isStreaming}
+          isLoading={conversationLoading}
+          error={conversationError}
+          onNewSession={startNewSession}
+          onOpenConversation={(id) => void openConversation(id)}
+          onRetry={() => void loadConversations()}
+        />
         <section
           className="message-list"
           ref={messageListRef}

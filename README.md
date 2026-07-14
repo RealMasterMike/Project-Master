@@ -1,4 +1,4 @@
-# Project Master — ALPHA v0.1.1
+# Project Master — ALPHA v0.2.0
 
 [Watch Master Mike on YouTube](https://www.youtube.com/@RealMasterMike?sub_confirmation=1) ·
 [Creator links](https://linktr.ee/realmastermike) ·
@@ -25,6 +25,7 @@ personality adaptation, response auditing, and conversation persistence.
 - Project Master primary emblem and MM creator mark
 - Rendered Markdown, tables, links, lists, blockquotes, and code blocks
 - Declarative interface customization with local layouts, Undo, and Reset
+- Conversation Library for creating, reopening, and reviewing saved local sessions
 
 The interface remains intentionally small. The engine's existing tools are available to the agent,
 but tool activity, memory, evidence, and conversation-management screens are not built yet.
@@ -37,7 +38,7 @@ The installer does **not** require Python, Node.js, or Rust. End users need:
 2. At least one Ollama chat model, for example `ollama pull qwen3:8b`
 3. Microsoft Edge WebView2 Runtime (already present on most current Windows systems)
 
-Install `Project-Master-ALPHA-v0.1.1-x64-setup.exe`, start Ollama, and open Project Master from the Start
+Install `Project-Master-ALPHA-v0.2.0-x64-setup.exe`, start Ollama, and open Project Master from the Start
 menu. The desktop app launches its bundled Python engine in the background and shuts it down when
 the app exits. If that engine crashes, the inline Retry action starts a replacement.
 

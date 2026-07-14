@@ -35,8 +35,8 @@ try {
     if (-not $health) {
         throw "Installed Project Master did not start its backend within 30 seconds."
     }
-    if ($health.version -ne "0.1.1") {
-        throw "Expected backend version 0.1.1, received $($health.version)."
+    if ($health.version -ne "0.2.0") {
+        throw "Expected backend version 0.2.0, received $($health.version)."
     }
 
     $installedBackend = [System.IO.Path]::GetFullPath(
@@ -72,7 +72,7 @@ try {
         throw "Project Master closed, but its packaged backend remained running."
     }
 
-    Write-Output "Installed app test passed: backend auto-started at v0.1.1 and stopped cleanly."
+    Write-Output "Installed app test passed: backend auto-started at v0.2.0 and stopped cleanly."
 } catch {
     $testError = $_
 } finally {

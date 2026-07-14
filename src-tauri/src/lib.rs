@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -17,6 +18,7 @@ const BACKEND_PORT: u16 = 8765;
 const BACKEND_START_TIMEOUT: Duration = Duration::from_secs(20);
 const BACKEND_START_GRACE: Duration = Duration::from_secs(5);
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
+const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct BackendState {
@@ -62,6 +64,38 @@ fn endpoint_is_open(address: SocketAddr) -> bool {
     TcpStream::connect_timeout(&address, BACKEND_CONNECT_TIMEOUT).is_ok()
 }
 
+fn active_backend_version(address: SocketAddr) -> Result<Option<String>, String> {
+    let mut stream = TcpStream::connect_timeout(&address, BACKEND_CONNECT_TIMEOUT)
+        .map_err(|error| format!("Unable to inspect the local backend: {error}"))?;
+    stream
+        .set_read_timeout(Some(BACKEND_RESPONSE_TIMEOUT))
+        .map_err(|error| format!("Unable to set the backend read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(BACKEND_RESPONSE_TIMEOUT))
+        .map_err(|error| format!("Unable to set the backend write timeout: {error}"))?;
+    stream
+        .write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .map_err(|error| format!("Unable to query the local backend: {error}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("Unable to read the local backend response: {error}"))?;
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "The local backend returned an invalid health response.".to_string())?;
+    let payload: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("The local backend returned invalid health data: {error}"))?;
+    Ok(payload
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned))
+}
+
+fn backend_version_matches_current(version: Option<&str>) -> bool {
+    version == Some(env!("CARGO_PKG_VERSION"))
+}
+
 fn wait_for_endpoint(address: SocketAddr, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -81,7 +115,15 @@ fn backend_can_be_replaced(uptime: Duration) -> bool {
 
 fn start_backend(app: &AppHandle) -> Result<bool, String> {
     if endpoint_is_open(backend_address()) {
-        return Ok(false);
+        let version = active_backend_version(backend_address())?;
+        if backend_version_matches_current(version.as_deref()) {
+            return Ok(false);
+        }
+        let description = version.unwrap_or_else(|| "an unknown version".to_string());
+        return Err(format!(
+            "An incompatible Project Master backend ({description}) is already using \
+             127.0.0.1:{BACKEND_PORT}. Close the other Project Master window, then choose Retry."
+        ));
     }
 
     let state = app.state::<BackendState>();
@@ -292,5 +334,14 @@ mod tests {
         assert!(!backend_can_be_replaced(Duration::from_secs(4)));
         assert!(backend_can_be_replaced(Duration::from_secs(5)));
         assert!(backend_can_be_replaced(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn backend_version_matching_rejects_stale_backends() {
+        assert!(backend_version_matches_current(Some(env!(
+            "CARGO_PKG_VERSION"
+        ))));
+        assert!(!backend_version_matches_current(Some("0.1.1")));
+        assert!(!backend_version_matches_current(None));
     }
 }
