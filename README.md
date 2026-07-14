@@ -105,6 +105,7 @@ The build creates Windows NSIS and MSI installers under `src-tauri\target\releas
 - `src-tauri/` — native Tauri host and narrowly scoped HTTP permissions
 - `ProjectMaster-v0.1.0/` — Python AI engine and local API
 - `MILESTONE_1.md` — completed scope, verification, and remaining local setup
+- `CHANGELOG.md` — release history and the mandatory documentation gate for every uploaded build
 - `DESIGN_BRIEF.md` — product source of truth
 - `BUILD_HANDOFF.md` — milestone sequence and technical handoff
 
