@@ -37,6 +37,8 @@ release.
 
 - Stop now sends an explicit cancellation request to the Python engine, which closes the active
   Ollama response and releases the provider before another prompt begins.
+- Durable memory can no longer be created from ordinary or exploratory chat by a model tool call;
+  a user must explicitly ask Project Master to remember, save, or store the information.
 
 ### Repository maintenance
 

@@ -123,6 +123,8 @@ Project Master is designed to be capable without silently taking broad control o
 - No unrestricted shell tool is included in v0.1.
 - Tool results are returned to the model as evidence, not automatically treated as truth.
 - Memory stores user-supplied information separately from verified evidence.
+- Ordinary conversation remains in the session history. Durable memory writes require an explicit
+  user request to remember, save, or store the information and are labeled as user-authorized.
 
 Enable workspace writes deliberately:
 

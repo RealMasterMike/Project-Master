@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -11,6 +12,11 @@ from project_master.llm.base import ChatProvider
 from project_master.memory.store import SQLiteStore
 from project_master.personality.profile import StyleProfiler
 from project_master.tools.base import ToolRegistry
+
+_EXPLICIT_MEMORY_REQUEST = re.compile(
+    r"\b(?:please\s+)?(?:remember|save|store)\b|\bkeep\s+(?:this|that|it)\s+in\s+mind\b",
+    re.IGNORECASE,
+)
 
 
 class ProjectMasterAgent:
@@ -53,12 +59,11 @@ class ProjectMasterAgent:
                 return final, executions
 
             for call in assistant.tool_calls:
-                name, arguments = _parse_tool_call(call)
-                ok, result = self.tools.execute(name, arguments)
-                executions.append(
-                    ToolExecution(name=name, arguments=arguments, result=result, ok=ok)
+                execution = self._execute_tool_call(call, user_text)
+                executions.append(execution)
+                messages.append(
+                    Message(role="tool", content=execution.result, tool_name=execution.name)
                 )
-                messages.append(Message(role="tool", content=result, tool_name=name))
 
         final = (
             "I reached the configured tool-call limit before producing a final answer. "
@@ -117,9 +122,7 @@ class ProjectMasterAgent:
                 if cancellation is not None and cancellation.cancelled:
                     yield {"type": "cancelled"}
                     return
-                name, arguments = _parse_tool_call(call)
-                ok, result = self.tools.execute(name, arguments)
-                execution = ToolExecution(name=name, arguments=arguments, result=result, ok=ok)
+                execution = self._execute_tool_call(call, user_text)
                 yield {
                     "type": "tool",
                     "tool": {
@@ -129,7 +132,9 @@ class ProjectMasterAgent:
                         "ok": execution.ok,
                     },
                 }
-                messages.append(Message(role="tool", content=result, tool_name=name))
+                messages.append(
+                    Message(role="tool", content=execution.result, tool_name=execution.name)
+                )
 
         final = (
             "I reached the configured tool-call limit before producing a final answer. "
@@ -151,6 +156,27 @@ class ProjectMasterAgent:
                 f"(source={item['source']}, confidence={item['confidence']:.2f})"
             )
         return "\n".join(lines)
+
+    def _execute_tool_call(self, call: dict[str, Any], user_text: str) -> ToolExecution:
+        name, arguments = _parse_tool_call(call)
+        if name == "memory_remember":
+            if not _EXPLICIT_MEMORY_REQUEST.search(user_text):
+                result = json.dumps(
+                    {
+                        "stored": False,
+                        "reason": (
+                            "Durable memory requires an explicit user request to remember, "
+                            "save, or store the information in the current message."
+                        ),
+                    }
+                )
+                return ToolExecution(name=name, arguments=arguments, result=result, ok=False)
+            # The model may propose the key and value, but the durable record must make its
+            # authorization visible during recall and later auditing.
+            arguments = {**arguments, "source": "explicit_user_request"}
+
+        ok, result = self.tools.execute(name, arguments)
+        return ToolExecution(name=name, arguments=arguments, result=result, ok=ok)
 
 
 def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
