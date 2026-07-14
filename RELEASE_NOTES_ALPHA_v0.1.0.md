@@ -1,5 +1,8 @@
 # Project Master — ALPHA v0.1.0
 
+> **Superseded:** the v0.1.0 Windows installer did not package the required Python backend. Install
+> v0.1.1 or newer instead.
+
 Project Master is a local-first research, reasoning, and creation assistant centered on epistemic
 reliability: separating facts, claims, evidence, inference, and uncertainty.
 

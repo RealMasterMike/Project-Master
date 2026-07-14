@@ -4,7 +4,7 @@ Project Master exposes a loopback-only HTTP API for the Tauri desktop client. Th
 adapter over the same runtime used by the CLI; it does not replace the agent, tools, memory,
 evidence ledger, personality profile, or response auditor.
 
-## Run
+## Run for development
 
 From `C:\Master\ProjectMaster-v0.1.0`:
 
@@ -13,8 +13,10 @@ From `C:\Master\ProjectMaster-v0.1.0`:
 master serve
 ```
 
-The default address is `http://127.0.0.1:8765`. Keep this terminal open while using the desktop
-application. The service intentionally binds to the local machine only.
+The default address is `http://127.0.0.1:8765`. Keep this terminal open when testing the API as a
+standalone development service. The installed desktop app packages the same runtime as a sidecar
+and manages startup, recovery, and shutdown automatically. The service intentionally binds to the
+local machine only.
 
 ## Endpoints
 

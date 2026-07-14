@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 ALPHA — 2026-07-14
+
+- Added a PyInstaller entry point for packaging the existing Python runtime as a Tauri sidecar.
+- Added Tauri-managed backend startup, readiness checks, application-data paths, logging, shutdown,
+  and stale-process replacement after a crash.
+- Routed both connection Retry and conversation Retry through the managed backend lifecycle.
+- Added sidecar, lifecycle, installed-app, forced-crash recovery, and clean-shutdown tests.
+- Preserved the standalone `master` CLI and `master serve` developer workflow.
+
 ## 0.1.0 ALPHA — 2026-07-14
 
 - Added a loopback FastAPI service with health, model status, chat, streaming chat, and

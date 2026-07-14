@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
 export const API_BASE_URL = "http://127.0.0.1:8765/api/v1";
@@ -32,9 +33,30 @@ interface StreamEvent {
 }
 
 export class ProjectMasterUnavailableError extends Error {
-  constructor() {
-    super(API_UNREACHABLE_MESSAGE);
+  constructor(message = API_UNREACHABLE_MESSAGE) {
+    super(message);
     this.name = "ProjectMasterUnavailableError";
+  }
+}
+
+interface ManagedBackendStatus {
+  ready: boolean;
+  started: boolean;
+}
+
+export async function ensureManagedBackend(): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+
+  try {
+    const status = await invoke<ManagedBackendStatus>("ensure_backend");
+    if (!status.ready) {
+      throw new Error("The packaged Project Master backend did not report ready.");
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new ProjectMasterUnavailableError(
+      `Project Master could not start its local backend. ${detail}`,
+    );
   }
 }
 
@@ -176,7 +198,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
 }
 
 export function formatProjectMasterError(error: unknown): string {
-  if (error instanceof ProjectMasterUnavailableError) return API_UNREACHABLE_MESSAGE;
+  if (error instanceof ProjectMasterUnavailableError) return error.message;
   if (error instanceof ProjectMasterHttpError) {
     return `Project Master request failed (${error.status}): ${error.message}`;
   }

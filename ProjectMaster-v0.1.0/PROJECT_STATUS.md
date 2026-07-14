@@ -1,11 +1,11 @@
 # Project Status
 
-**Release:** v0.1.0
+**Release:** v0.1.1
 
 **Channel:** ALPHA
 
 **Codename:** Foundation
-**State:** Public developer-preview candidate
+**State:** Packaged Windows alpha
 
 ## Complete in this release
 
@@ -21,13 +21,14 @@
 - [x] Tests and schemas
 - [x] Loopback local API with regular and streaming chat endpoints
 - [x] Existing Tauri Milestone 1 client connected to the Python engine
+- [x] Packaged desktop distribution with managed Python API lifecycle
+- [x] Crash detection, inline failure, one-click Retry recovery, and clean shutdown
 - [x] Task breakdown for every major subsystem
 
 ## Deliberately deferred
 
 - [ ] Full web research provider
 - [ ] Retrieval-augmented document library
-- [ ] Packaged desktop distribution with managed Python API lifecycle
 - [ ] Voice input/output
 - [ ] Multi-agent orchestration
 - [ ] Scheduled and background tasks

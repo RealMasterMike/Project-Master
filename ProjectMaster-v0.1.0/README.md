@@ -1,4 +1,4 @@
-# Project Master v0.1.0
+# Project Master v0.1.1
 
 [Master Mike on YouTube](https://www.youtube.com/@RealMasterMike?sub_confirmation=1) ·
 [Creator links](https://linktr.ee/realmastermike) ·
@@ -6,7 +6,7 @@
 
 Project Master is a local-first AI framework designed around **epistemic reliability**: the assistant should represent reality as accurately as the available evidence allows, clearly separate facts from claims and inference, calibrate confidence, and revise conclusions when better evidence appears.
 
-Version 0.1.0 is a runnable command-line MVP built for Ollama. It includes:
+Version 0.1.1 is a runnable command-line MVP and packaged desktop engine built for Ollama. It includes:
 
 - an epistemic system prompt and project constitution;
 - an Ollama chat provider with tool-call support;
@@ -17,6 +17,7 @@ Version 0.1.0 is a runnable command-line MVP built for Ollama. It includes:
 - a deterministic response auditor;
 - a Windows bootstrap script, tests, schemas, architecture docs, and task files.
 - a loopback-only local API for the Tauri client, including streaming responses.
+- a PyInstaller sidecar entry point used by the Tauri Windows installer.
 
 ## Design principle
 
@@ -136,7 +137,8 @@ MASTER_ALLOW_FILE_WRITES=true
 - Web research is not bundled because search providers require different credentials and terms. The tool registry is ready for a search plugin in a later phase.
 - The response auditor is a heuristic linter, not a second independent model.
 - Local-model tool calling varies by model quality.
-- The Tauri alpha client is a separate project and requires this API to run as a second process.
+- The installed Tauri alpha client starts and stops the packaged API automatically. Developers can
+  still run `master serve` independently.
 
 ## Project status
 

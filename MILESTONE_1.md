@@ -1,4 +1,4 @@
-# Project Master — ALPHA v0.1.0 Status
+# Project Master — ALPHA v0.1.1 Status
 
 Status: **Implemented and connected to the Project Master Python engine.**
 
@@ -16,26 +16,31 @@ Status: **Implemented and connected to the Project Master Python engine.**
 - Owner-approved Project Master AI emblem, MM creator mark, and native application icons
 - Navy, gold, and electric-violet brand palette
 - GitHub-flavored Markdown rendering for structured assistant responses
+- Packaged Python engine sidecar with automatic startup, shutdown, logging, and Retry recovery
+- Windows NSIS and MSI installers containing both the desktop interface and Python engine
 
 ## Explicitly not included
 
 No tool-activity view, memory/evidence UI, YOLO mode, onboarding, workspace presets, model pulling,
-saved settings, automatic backend lifecycle, or telemetry. Engine tools remain available through
-the Python agent and retain their existing workspace restrictions.
+saved settings, or telemetry. Engine tools remain available through the Python agent and retain
+their existing workspace restrictions.
 
 ## Verification completed
 
 - `npm run build` — passed
 - `cargo fmt --all -- --check` — passed
 - `cargo check` with the MSVC toolchain — passed
-- Python backend tests — 17 passed
+- Python backend tests — 20 passed
+- Packaged backend sidecar smoke test — passed
+- Rust lifecycle tests — 4 passed
+- Installed-app startup and clean-shutdown test — passed
+- Forced backend crash → inline error → one-click Retry → completed chat response — passed
 - Live API-to-Ollama streaming request — passed with `qwen3:8b` and 32768 context
-- Branded frontend production build and native Tauri check — passed
+- Branded frontend production build and Windows NSIS/MSI builds — passed
 
-## Remaining local setup
+## Remaining interface work
 
-The Python backend currently runs as a separate local process. A later packaging task should make
-Tauri start and stop that service automatically. Tool activity and persistent conversation
-selection also still need interface designs.
+Tool activity, memory/evidence inspection, settings, and persistent conversation selection still
+need owner-approved interface designs. Ollama remains an external local dependency.
 
 Do not begin a later milestone without the owner's direction.

@@ -19,11 +19,13 @@ dist-ssr
 *.zip
 release/
 src-tauri/target/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
 
 # Python environments, caches, and generated packages
 __pycache__/
 *.py[cod]
-.venv/
+.venv*/
 .pytest_cache/
 .ruff_cache/
 .coverage

@@ -11,6 +11,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
 import {
+  ensureManagedBackend,
   formatProjectMasterError,
   getModelStatus,
   isAbortError,
@@ -70,6 +71,7 @@ function App() {
     setConnectionError(null);
 
     try {
+      await ensureManagedBackend();
       const status = await getModelStatus(controller.signal);
       const availableModels = status.models;
       if (controller.signal.aborted) {
@@ -283,14 +285,28 @@ function App() {
     streamControllerRef.current?.abort();
   }
 
-  function retryMessage(messageId: string): void {
+  async function retryMessage(messageId: string): Promise<void> {
     if (isStreaming) {
       return;
     }
 
     const request = retryRequestsRef.current.get(messageId);
     if (request) {
-      void runAssistantResponse(messageId, request);
+      setConnectionState("checking");
+      try {
+        await ensureManagedBackend();
+        await runAssistantResponse(messageId, request);
+      } catch (error) {
+        const displayError = formatProjectMasterError(error);
+        setConnectionState("offline");
+        setMessages((currentMessages) =>
+          currentMessages.map((message) =>
+            message.id === messageId
+              ? { ...message, error: displayError, status: "error" }
+              : message,
+          ),
+        );
+      }
     }
   }
 
@@ -306,7 +322,7 @@ function App() {
   const composerPlaceholder = isStreaming
     ? "MASTER is responding…"
     : connectionState === "offline"
-      ? "Start the Project Master backend, then retry"
+      ? "Project Master is offline — press Retry"
       : connectionState === "empty"
         ? "Install an Ollama model to begin"
         : "Message MASTER";
@@ -322,7 +338,7 @@ function App() {
           />
           <span className="brand-copy">
             <span className="brand-name">MASTER</span>
-            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.1.0</span>
+            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.1.1</span>
           </span>
         </div>
 
@@ -463,7 +479,7 @@ function App() {
                     <button
                       className="button button--secondary"
                       type="button"
-                      onClick={() => retryMessage(message.id)}
+                      onClick={() => void retryMessage(message.id)}
                       disabled={isStreaming}
                     >
                       Retry
