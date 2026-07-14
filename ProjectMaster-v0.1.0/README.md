@@ -15,7 +15,7 @@ Version 0.1.1 is a runnable command-line MVP and packaged desktop engine built f
 - adaptive communication-style profiling that mirrors style, not beliefs;
 - workspace-scoped file tools, a safe calculator, time, memory, and evidence tools;
 - a deterministic response auditor;
-- a Windows bootstrap script, tests, schemas, architecture docs, and task files.
+- a Windows bootstrap script, tests, schemas, and architecture documentation.
 - a loopback-only local API for the Tauri client, including streaming responses.
 - a PyInstaller sidecar entry point used by the Tauri Windows installer.
 
@@ -110,7 +110,6 @@ docs/               Architecture and subsystem specifications
 prompts/             Human-readable prompt drafts
 schemas/             JSON schemas for claims, memory, tasks, and responses
 src/project_master/  Runnable Python package
-tasks/               One task file for every major Project Master subsystem
 tests/               Unit tests
 scripts/             Windows bootstrap and run scripts
 ```
@@ -140,9 +139,9 @@ MASTER_ALLOW_FILE_WRITES=true
 - The installed Tauri alpha client starts and stops the packaged API automatically. Developers can
   still run `master serve` independently.
 
-## Project status
+## Development direction
 
-See [PROJECT_STATUS.md](PROJECT_STATUS.md), [ROADMAP.md](ROADMAP.md), and [TASKS.md](TASKS.md).
+See [ROADMAP.md](ROADMAP.md) for planned work.
 
 ## License
 

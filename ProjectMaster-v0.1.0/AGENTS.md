@@ -1,11 +1,7 @@
-# Instructions for AI Coding Agents
+# Repository Contribution Rules
 
-Read these files before editing:
-
-1. `constitution/CONSTITUTION.md`
-2. `PROJECT_STATUS.md`
-3. `ROADMAP.md`
-4. the task file for the subsystem being changed
+Before editing the Python engine, read `constitution/CONSTITUTION.md`, `ROADMAP.md`, and the
+documentation and tests for the subsystem being changed.
 
 ## Working rules
 
@@ -18,14 +14,10 @@ Read these files before editing:
 - Human-like emotional phrasing must not imply literal machine feelings or consciousness.
 - Keep Windows as a first-class supported environment.
 - Run `pytest` after code changes. Run `ruff check .` when Ruff is installed.
-- Update `CHANGELOG.md`, `PROJECT_STATUS.md`, and the relevant task file when a milestone changes.
+- Record user-visible changes in the repository's root `../CHANGELOG.md`.
+- Keep one rolling changelog on the default branch. Put version-specific notes in the matching
+  GitHub Release instead of adding separate release-note files.
 
 ## Current priority
 
 Phase 2 starts with the Research Engine. Do not begin multi-agent autonomy before source provenance, claim decomposition, and completion verification are stronger.
-
-## Portable handoff prompt
-
-When another AI continues this project, tell it:
-
-> Continue Project Master incrementally. First inspect the constitution, current status, roadmap, and relevant task file. Preserve provenance and calibrated confidence. Do not replace the existing architecture without identifying a concrete failure and migration plan.

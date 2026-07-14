@@ -7,7 +7,8 @@ All notable Project Master desktop releases are recorded here.
 No build may be uploaded or published unless all of the following are complete:
 
 - Add a versioned entry to this changelog.
-- Add version-matched release notes describing changes, fixes, known issues, and verification.
+- Draft version-matched GitHub Release notes describing changes, fixes, known issues, and
+  verification.
 - Build and test the exact artifacts intended for upload.
 - Generate checksums after the final artifacts are produced.
 - Confirm the changelog, release notes, artifact filenames, application version, tag, and checksums
@@ -15,6 +16,19 @@ No build may be uploaded or published unless all of the following are complete:
 
 If any item is missing, the release is blocked. Finish the release documentation before uploading
 another build.
+
+`CHANGELOG.md` is the only rolling changelog kept on the default branch. Do not add separate
+per-version changelog or release-note files to the default branch. Version-specific notes belong in
+the matching GitHub Release; historical tags preserve the repository exactly as it existed for that
+release.
+
+## Unreleased
+
+### Repository maintenance
+
+- Removed obsolete build handoffs, portable AI prompts, duplicate release-note files, and stale task
+  tracking documents from the default branch.
+- Consolidated release history into this rolling changelog.
 
 ## 0.1.1 ALPHA — 2026-07-14
 
