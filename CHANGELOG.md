@@ -24,6 +24,20 @@ release.
 
 ## Unreleased
 
+### Added
+
+- Added a versioned, declarative layout schema with validated operations for panel visibility,
+  collapsed state, ordering, tab grouping, and constrained widths.
+- Added an interface customization panel with chat and panel sizing, collapse/expand behavior,
+  named saved layouts, local persistence, Undo, and Reset to default.
+- Added executable break-tests for invalid panels, arbitrary operations, forbidden states, stale
+  revisions, invalid dimensions, oversized batches, transactional rollback, and corrupt storage.
+
+### Fixed
+
+- Stop now sends an explicit cancellation request to the Python engine, which closes the active
+  Ollama response and releases the provider before another prompt begins.
+
 ### Repository maintenance
 
 - Removed obsolete build handoffs, portable AI prompts, duplicate release-note files, and stale task

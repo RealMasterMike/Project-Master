@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, Protocol
 
+from project_master.core.cancellation import CancellationToken
 from project_master.core.models import Message
 
 
@@ -18,5 +19,6 @@ class ChatProvider(Protocol):
         self,
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> Iterator[Message]:
         """Yield assistant message fragments."""

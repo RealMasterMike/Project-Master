@@ -4,6 +4,7 @@ import json
 from collections.abc import Iterator
 from typing import Any
 
+from project_master.core.cancellation import CancellationToken
 from project_master.core.models import Message, ToolExecution
 from project_master.core.prompting import PromptBuilder
 from project_master.llm.base import ChatProvider
@@ -66,7 +67,12 @@ class ProjectMasterAgent:
         self.store.add_message(session_id, "assistant", final)
         return final, executions
 
-    def respond_stream(self, session_id: str, user_text: str) -> Iterator[dict[str, Any]]:
+    def respond_stream(
+        self,
+        session_id: str,
+        user_text: str,
+        cancellation: CancellationToken | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Run the normal agent loop while yielding observable progress events."""
         self.profiler.observe(user_text)
         self.store.add_message(session_id, "user", user_text)
@@ -79,12 +85,21 @@ class ProjectMasterAgent:
         for _round in range(self.max_tool_rounds):
             content_parts: list[str] = []
             tool_calls: list[dict[str, Any]] = []
-            for fragment in self.provider.chat_stream(messages, self.tools.schemas()):
+            for fragment in self.provider.chat_stream(
+                messages, self.tools.schemas(), cancellation=cancellation
+            ):
+                if cancellation is not None and cancellation.cancelled:
+                    yield {"type": "cancelled"}
+                    return
                 if fragment.content:
                     content_parts.append(fragment.content)
                     yield {"type": "token", "content": fragment.content}
                 if fragment.tool_calls:
                     tool_calls.extend(fragment.tool_calls)
+
+            if cancellation is not None and cancellation.cancelled:
+                yield {"type": "cancelled"}
+                return
 
             assistant = Message(
                 role="assistant",
@@ -99,6 +114,9 @@ class ProjectMasterAgent:
                 return
 
             for call in assistant.tool_calls:
+                if cancellation is not None and cancellation.cancelled:
+                    yield {"type": "cancelled"}
+                    return
                 name, arguments = _parse_tool_call(call)
                 ok, result = self.tools.execute(name, arguments)
                 execution = ToolExecution(name=name, arguments=arguments, result=result, ok=ok)

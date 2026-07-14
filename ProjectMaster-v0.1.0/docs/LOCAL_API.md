@@ -26,13 +26,19 @@ local machine only.
 | `GET` | `/api/v1/models/status` | Configured model, installed models, and context length |
 | `POST` | `/api/v1/chat` | Complete agent response with tool activity and audit findings |
 | `POST` | `/api/v1/chat/stream` | NDJSON token, tool, completion, and error events |
+| `POST` | `/api/v1/chat/cancel` | Cancel an active stream by request ID |
 | `POST` | `/api/v1/conversations` | Create a persistent conversation |
 | `GET` | `/api/v1/conversations` | List persistent conversations |
 | `GET` | `/api/v1/conversations/{id}` | Read conversation messages |
 
-Chat requests accept `message`, optional `conversation_id`, and optional `model`. When no model is
-sent, `MASTER_MODEL` is used. The engine remains responsible for system prompting, tools, memory,
-evidence, personality adaptation, and persistence.
+Chat requests accept `message`, optional `conversation_id`, optional `model`, and an optional
+`request_id`. The desktop client assigns a unique request ID to every stream. Sending that ID to
+`/api/v1/chat/cancel` cooperatively stops the agent and closes the active Ollama response, including
+when the desktop fetch has already disconnected. A cancellation requested just before stream
+registration is retained briefly to prevent a start/cancel race.
+
+When no model is sent, `MASTER_MODEL` is used. The engine remains responsible for system prompting,
+tools, memory, evidence, personality adaptation, and persistence.
 
 ## Configuration
 

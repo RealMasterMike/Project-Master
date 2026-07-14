@@ -24,6 +24,7 @@
 3. Tauri desktop client
 4. Streaming mode and creator controls
 5. Accessibility and dictation correction
+6. Declarative interface personalization and validated AI-directed layouts
 
 ## Phase 4 — Controlled autonomy
 

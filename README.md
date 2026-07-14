@@ -24,6 +24,7 @@ personality adaptation, response auditing, and conversation persistence.
 - Branded navy, gold, and electric-violet visual system
 - Project Master primary emblem and MM creator mark
 - Rendered Markdown, tables, links, lists, blockquotes, and code blocks
+- Declarative interface customization with local layouts, Undo, and Reset
 
 The interface remains intentionally small. The engine's existing tools are available to the agent,
 but tool activity, memory, evidence, and conversation-management screens are not built yet.
@@ -104,6 +105,7 @@ The build creates Windows NSIS and MSI installers under `src-tauri\target\releas
 - `public/brand/` — owner-supplied primary and heritage identity assets
 - `src-tauri/` — native Tauri host and narrowly scoped HTTP permissions
 - `ProjectMaster-v0.1.0/` — Python AI engine and local API
+- `docs/UI_CUSTOMIZATION.md` — validated layout architecture and future AI-control boundary
 - `CHANGELOG.md` — release history and the mandatory documentation gate for every uploaded build
 - `DESIGN_BRIEF.md` — product source of truth
 

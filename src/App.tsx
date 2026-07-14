@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ChangeEvent,
   type FormEvent,
   type KeyboardEvent,
@@ -10,7 +11,10 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
+import { LayoutCustomizer } from "./components/LayoutCustomizer";
+import { useLayoutController } from "./hooks/useLayoutController";
 import {
+  cancelChat,
   ensureManagedBackend,
   formatProjectMasterError,
   getModelStatus,
@@ -37,6 +41,11 @@ interface RetryRequest {
   conversationId?: string;
 }
 
+interface ActiveStream {
+  controller: AbortController;
+  requestId: string;
+}
+
 let nextMessageId = 0;
 
 function createMessageId(role: UiMessage["role"]): string {
@@ -45,6 +54,7 @@ function createMessageId(role: UiMessage["role"]): string {
 }
 
 function App() {
+  const layoutController = useLayoutController();
   const [models, setModels] = useState<ProjectMasterModel[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [conversationId, setConversationId] = useState<string>();
@@ -57,7 +67,7 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false);
 
   const modelLoadControllerRef = useRef<AbortController | null>(null);
-  const streamControllerRef = useRef<AbortController | null>(null);
+  const streamControllerRef = useRef<ActiveStream | null>(null);
   const retryRequestsRef = useRef(new Map<string, RetryRequest>());
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -124,7 +134,11 @@ function App() {
 
   useEffect(() => {
     return () => {
-      streamControllerRef.current?.abort();
+      const activeStream = streamControllerRef.current;
+      if (activeStream) {
+        activeStream.controller.abort();
+        void cancelChat(activeStream.requestId).catch(() => undefined);
+      }
     };
   }, []);
 
@@ -140,7 +154,8 @@ function App() {
     request: RetryRequest,
   ): Promise<void> {
     const controller = new AbortController();
-    streamControllerRef.current = controller;
+    const requestId = crypto.randomUUID();
+    streamControllerRef.current = { controller, requestId };
     retryRequestsRef.current.set(assistantId, request);
     setIsStreaming(true);
     setConnectionError(null);
@@ -154,6 +169,7 @@ function App() {
 
     try {
       await streamChat({
+        requestId,
         model: request.model,
         message: request.message,
         conversationId: request.conversationId,
@@ -208,7 +224,7 @@ function App() {
         }
       }
     } finally {
-      if (streamControllerRef.current === controller) {
+      if (streamControllerRef.current?.controller === controller) {
         streamControllerRef.current = null;
         setIsStreaming(false);
       }
@@ -282,7 +298,12 @@ function App() {
   }
 
   function stopStreaming(): void {
-    streamControllerRef.current?.abort();
+    const activeStream = streamControllerRef.current;
+    if (!activeStream) {
+      return;
+    }
+    activeStream.controller.abort();
+    void cancelChat(activeStream.requestId).catch(() => undefined);
   }
 
   async function retryMessage(messageId: string): Promise<void> {
@@ -326,6 +347,12 @@ function App() {
       : connectionState === "empty"
         ? "Install an Ollama model to begin"
         : "Message MASTER";
+  const chatLayout = layoutController.layout.panels.chat_panel;
+  const customizerLayout = layoutController.layout.panels.customize_panel;
+  const workspaceStyle = {
+    "--chat-content-width": `${chatLayout.width}%`,
+    "--customizer-width": `${customizerLayout.width}px`,
+  } as CSSProperties;
 
   return (
     <main className="app-shell">
@@ -371,6 +398,24 @@ function App() {
             </select>
           </label>
 
+          <button
+            className="button button--secondary button--customize"
+            type="button"
+            aria-expanded={customizerLayout.visible}
+            aria-controls="layout-customizer"
+            onClick={() =>
+              layoutController.applyOperations([
+                {
+                  operation: "set_visibility",
+                  target: "customize_panel",
+                  value: !customizerLayout.visible,
+                },
+              ])
+            }
+          >
+            Customize
+          </button>
+
           {isStreaming ? (
             <button
               className="button button--stop"
@@ -383,11 +428,12 @@ function App() {
         </div>
       </header>
 
-      <section
-        className="message-list"
-        ref={messageListRef}
-        aria-label="Conversation"
-      >
+      <div className="workspace-shell" style={workspaceStyle}>
+        <section
+          className="message-list"
+          ref={messageListRef}
+          aria-label="Conversation"
+        >
         {connectionError ? (
           <div className="connection-notice" role="alert">
             <div>
@@ -490,7 +536,24 @@ function App() {
             ))}
           </div>
         )}
-      </section>
+        </section>
+
+        {customizerLayout.visible ? (
+          <div id="layout-customizer">
+            <LayoutCustomizer
+              layout={layoutController.layout}
+              canUndo={layoutController.canUndo}
+              savedLayouts={layoutController.savedLayouts}
+              onApplyOperations={layoutController.applyOperations}
+              onUndo={layoutController.undo}
+              onReset={layoutController.reset}
+              onSave={layoutController.saveCurrent}
+              onApplySaved={layoutController.applySaved}
+              onDeleteSaved={layoutController.deleteSaved}
+            />
+          </div>
+        ) : null}
+      </div>
 
       <footer className="composer-shell">
         <form className="composer" onSubmit={handleSubmit}>

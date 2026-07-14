@@ -17,6 +17,7 @@ interface ModelStatus {
 }
 
 interface StreamChatOptions {
+  requestId: string;
   model: string;
   message: string;
   conversationId?: string;
@@ -156,7 +157,17 @@ function parseEvent(line: string, options: StreamChatOptions): boolean {
   if (event.type === "error") {
     throw new Error(typeof event.error === "string" ? event.error : "Backend stream failed.");
   }
+  if (event.type === "cancelled") throw createAbortError();
   return event.type === "done";
+}
+
+export async function cancelChat(requestId: string): Promise<void> {
+  const response = await request("/chat/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request_id: requestId }),
+  });
+  await ensureSuccess(response);
 }
 
 export async function streamChat(options: StreamChatOptions): Promise<void> {
@@ -164,6 +175,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      request_id: options.requestId,
       message: options.message,
       conversation_id: options.conversationId,
       model: options.model,

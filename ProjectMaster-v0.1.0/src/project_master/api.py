@@ -4,6 +4,7 @@ import json
 from collections.abc import Iterator
 from dataclasses import asdict
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from project_master import __version__
 from project_master.core.audit import audit_response
+from project_master.core.cancellation import StreamCancellationRegistry
 from project_master.llm.ollama import OllamaError
 from project_master.runtime import MasterRuntime, build_runtime
 
@@ -24,10 +26,21 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=100_000)
     conversation_id: str | None = None
     model: str | None = None
+    request_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+
+class ChatCancelRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 def create_app(runtime: MasterRuntime | None = None) -> FastAPI:
     active = runtime or build_runtime()
+    cancellations = StreamCancellationRegistry()
     app = FastAPI(title="Project Master Local API", version=__version__)
     app.add_middleware(
         CORSMiddleware,
@@ -107,13 +120,28 @@ def create_app(runtime: MasterRuntime | None = None) -> FastAPI:
 
     @app.post("/api/v1/chat/stream")
     def chat_stream(body: ChatRequest) -> StreamingResponse:
-        session_id = conversation_id(body)
+        request_id = body.request_id or str(uuid4())
+        try:
+            cancellation = cancellations.register(request_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            session_id = conversation_id(body)
+        except Exception:
+            cancellations.finish(request_id, cancellation)
+            raise
 
         def events() -> Iterator[str]:
-            yield _event({"type": "start", "conversation_id": session_id})
             try:
+                yield _event(
+                    {
+                        "type": "start",
+                        "conversation_id": session_id,
+                        "request_id": request_id,
+                    }
+                )
                 for event in active.agent_for_model(body.model).respond_stream(
-                    session_id, body.message
+                    session_id, body.message, cancellation=cancellation
                 ):
                     if event["type"] == "done":
                         event["conversation_id"] = session_id
@@ -131,8 +159,15 @@ def create_app(runtime: MasterRuntime | None = None) -> FastAPI:
                         "retryable": False,
                     }
                 )
+            finally:
+                cancellations.finish(request_id, cancellation)
 
         return StreamingResponse(events(), media_type="application/x-ndjson")
+
+    @app.post("/api/v1/chat/cancel")
+    def cancel_chat(body: ChatCancelRequest) -> dict[str, bool]:
+        active_stream = cancellations.cancel(body.request_id)
+        return {"accepted": True, "active": active_stream}
 
     return app
 

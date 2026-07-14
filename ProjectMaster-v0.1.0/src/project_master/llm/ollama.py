@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from project_master.core.cancellation import CancellationToken
 from project_master.core.models import Message
 
 
@@ -82,7 +83,10 @@ class OllamaClient:
         self,
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> Iterator[Message]:
+        if cancellation is not None and cancellation.cancelled:
+            return
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [message.to_ollama() for message in messages],
@@ -99,8 +103,13 @@ class OllamaClient:
                 json=payload,
                 timeout=self.timeout_seconds,
             ) as response:
+                close_response = response.close
+                if cancellation is not None:
+                    cancellation.bind_closer(close_response)
                 response.raise_for_status()
                 for line in response.iter_lines():
+                    if cancellation is not None and cancellation.cancelled:
+                        return
                     if not line.strip():
                         continue
                     data = json.loads(line)
@@ -119,4 +128,9 @@ class OllamaClient:
             body = exc.response.text[:1000]
             raise OllamaError(f"Ollama returned HTTP {exc.response.status_code}: {body}") from exc
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
+            if cancellation is not None and cancellation.cancelled:
+                return
             raise OllamaError(f"Ollama streaming request failed: {exc}") from exc
+        finally:
+            if cancellation is not None and "close_response" in locals():
+                cancellation.unbind_closer(close_response)

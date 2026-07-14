@@ -1,4 +1,5 @@
 import json
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 from project_master.agent import ProjectMasterAgent
 from project_master.api import create_app
 from project_master.config import MasterConfig
+from project_master.core.cancellation import CancellationToken
 from project_master.core.models import Message
 from project_master.core.prompting import PromptBuilder
 from project_master.memory.store import SQLiteStore
@@ -26,13 +28,36 @@ class FakeProvider:
         return Message(role="assistant", content="Test response")
 
     def chat_stream(
-        self, messages: list[Message], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> Iterator[Message]:
         yield Message(role="assistant", content="Test ")
         yield Message(role="assistant", content="response")
 
 
-def make_runtime(tmp_path: Path) -> MasterRuntime:
+class BlockingProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.stopped = threading.Event()
+
+    def chat_stream(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> Iterator[Message]:
+        assert cancellation is not None
+        self.started.set()
+        cancellation.wait(timeout=5)
+        if cancellation.cancelled:
+            self.stopped.set()
+            return
+        yield Message(role="assistant", content="Cancellation failed")
+
+
+def make_runtime(tmp_path: Path, provider: FakeProvider | None = None) -> MasterRuntime:
     config = MasterConfig(
         model="test-model",
         db_path=tmp_path / "test.db",
@@ -41,7 +66,7 @@ def make_runtime(tmp_path: Path) -> MasterRuntime:
     )
     store = SQLiteStore(config.db_path)
     profiler = StyleProfiler(store)
-    provider = FakeProvider()
+    provider = provider or FakeProvider()
     agent = ProjectMasterAgent(
         provider=provider,
         tools=build_registry(store, config.workspace_root),
@@ -95,3 +120,45 @@ def test_conversation_and_non_streaming_chat_endpoints(tmp_path: Path) -> None:
     listed = client.get("/api/v1/conversations").json()["conversations"]
     assert listed[0]["id"] == conversation_id
     assert listed[0]["message_count"] == 2
+
+
+def test_chat_stream_can_be_cancelled_and_releases_provider(tmp_path: Path) -> None:
+    provider = BlockingProvider()
+    client = TestClient(create_app(make_runtime(tmp_path, provider)))
+    result: dict[str, Any] = {}
+
+    def run_stream() -> None:
+        result["response"] = client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Keep generating", "request_id": "cancel-test"},
+        )
+
+    worker = threading.Thread(target=run_stream, daemon=True)
+    worker.start()
+    assert provider.started.wait(timeout=2)
+
+    cancelled = client.post("/api/v1/chat/cancel", json={"request_id": "cancel-test"})
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"accepted": True, "active": True}
+
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert provider.stopped.is_set()
+    events = [json.loads(line) for line in result["response"].iter_lines() if line]
+    assert events[-1]["type"] == "cancelled"
+
+
+def test_cancel_before_stream_registration_is_not_lost(tmp_path: Path) -> None:
+    provider = BlockingProvider()
+    client = TestClient(create_app(make_runtime(tmp_path, provider)))
+
+    cancelled = client.post("/api/v1/chat/cancel", json={"request_id": "early-cancel"})
+    assert cancelled.json() == {"accepted": True, "active": False}
+    response = client.post(
+        "/api/v1/chat/stream",
+        json={"message": "Do not start", "request_id": "early-cancel"},
+    )
+
+    assert provider.stopped.is_set()
+    events = [json.loads(line) for line in response.iter_lines() if line]
+    assert events[-1]["type"] == "cancelled"
