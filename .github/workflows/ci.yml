@@ -49,13 +49,19 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - run: npm ci
+      - run: npm run backend:sidecar
+      - run: npm run backend:sidecar:test
       - run: cargo fmt --manifest-path .\src-tauri\Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path .\src-tauri\Cargo.toml --all-targets -- -D warnings
-      - run: cargo check --manifest-path .\src-tauri\Cargo.toml
+      - run: cargo test --manifest-path .\src-tauri\Cargo.toml
+      - run: npx tauri build --no-bundle
 
   dependency-audit:
     name: Rust dependency audit
