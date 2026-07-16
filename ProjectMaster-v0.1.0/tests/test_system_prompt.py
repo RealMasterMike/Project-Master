@@ -13,3 +13,6 @@ def test_system_prompt_defines_a_grounded_first_session_and_capability_contract(
         in prompt
     )
     assert "File writing may be disabled" in prompt
+    assert "Preserve the user's actual meaning" in prompt
+    assert "Before correcting, challenging, or disagreeing" in prompt
+    assert "Default to analysis when a user asks for analysis" in prompt

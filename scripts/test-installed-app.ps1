@@ -5,6 +5,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$expectedVersion = (Get-Content (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json).version
 $resolvedApp = [System.IO.Path]::GetFullPath($AppPath)
 if (-not (Test-Path $resolvedApp)) {
     throw "Installed Project Master executable not found at $resolvedApp."
@@ -35,8 +37,8 @@ try {
     if (-not $health) {
         throw "Installed Project Master did not start its backend within 30 seconds."
     }
-    if ($health.version -ne "0.2.0") {
-        throw "Expected backend version 0.2.0, received $($health.version)."
+    if ($health.version -ne $expectedVersion) {
+        throw "Expected backend version $expectedVersion, received $($health.version)."
     }
 
     $installedBackend = [System.IO.Path]::GetFullPath(
@@ -72,7 +74,7 @@ try {
         throw "Project Master closed, but its packaged backend remained running."
     }
 
-    Write-Output "Installed app test passed: backend auto-started at v0.2.0 and stopped cleanly."
+    Write-Output "Installed app test passed: backend auto-started at v$expectedVersion and stopped cleanly."
 } catch {
     $testError = $_
 } finally {

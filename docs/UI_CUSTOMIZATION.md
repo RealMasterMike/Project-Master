@@ -17,7 +17,9 @@ registry.
 - transactional validation: an invalid operation rejects the entire command.
 
 The first vertical slice is the tabbed **Customize** panel. It proves collapse, resizing, saved
-layouts, recovery, and persistence without exposing application code to the model.
+layouts, recovery, and persistence without exposing application code to the model. Its local
+**Communication** tab reads the backend's auditable communication profile and records constrained
+user corrections; it does not alter the layout command schema or permit generated code.
 
 ## Command contract
 

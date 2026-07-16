@@ -1,5 +1,10 @@
 import { useState } from "react";
+import { CommunicationProfilePanel } from "./CommunicationProfilePanel";
 import type { LayoutDocument, LayoutOperation, SavedLayout } from "../lib/layout";
+import type {
+  CommunicationFeedbackCategory,
+  ProjectMasterCommunicationProfile,
+} from "../lib/projectMasterApi";
 
 interface LayoutCustomizerProps {
   layout: LayoutDocument;
@@ -11,9 +16,18 @@ interface LayoutCustomizerProps {
   onSave: (name: string) => void;
   onApplySaved: (id: string) => void;
   onDeleteSaved: (id: string) => void;
+  communicationProfile: ProjectMasterCommunicationProfile | null;
+  communicationLoading: boolean;
+  communicationError: string | null;
+  onRefreshCommunication: () => void;
+  onSubmitCommunicationFeedback: (
+    category: CommunicationFeedbackCategory,
+    note: string,
+    scope: "global" | "situational",
+  ) => Promise<void>;
 }
 
-type CustomizerTab = "layout" | "saved";
+type CustomizerTab = "layout" | "saved" | "communication";
 
 export function LayoutCustomizer({
   layout,
@@ -25,6 +39,11 @@ export function LayoutCustomizer({
   onSave,
   onApplySaved,
   onDeleteSaved,
+  communicationProfile,
+  communicationLoading,
+  communicationError,
+  onRefreshCommunication,
+  onSubmitCommunicationFeedback,
 }: LayoutCustomizerProps) {
   const [activeTab, setActiveTab] = useState<CustomizerTab>("layout");
   const [layoutName, setLayoutName] = useState("");
@@ -153,6 +172,17 @@ export function LayoutCustomizer({
           Saved
           {savedLayouts.length > 0 ? <span>{savedLayouts.length}</span> : null}
         </button>
+        <button
+          id="customizer-tab-communication"
+          className={activeTab === "communication" ? "is-active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "communication"}
+          aria-controls="customizer-panel-communication"
+          onClick={() => setActiveTab("communication")}
+        >
+          Communication
+        </button>
       </div>
 
       <div className="customizer-content">
@@ -247,7 +277,7 @@ export function LayoutCustomizer({
               </div>
             </div>
           </div>
-        ) : (
+        ) : activeTab === "saved" ? (
           <div
             id="customizer-panel-saved"
             className="customizer-section"
@@ -280,6 +310,21 @@ export function LayoutCustomizer({
                 ))}
               </ul>
             )}
+          </div>
+        ) : (
+          <div
+            id="customizer-panel-communication"
+            className="customizer-section customizer-section--communication"
+            role="tabpanel"
+            aria-labelledby="customizer-tab-communication"
+          >
+            <CommunicationProfilePanel
+              profile={communicationProfile}
+              isLoading={communicationLoading}
+              error={communicationError}
+              onRefresh={onRefreshCommunication}
+              onSubmitFeedback={onSubmitCommunicationFeedback}
+            />
           </div>
         )}
       </div>

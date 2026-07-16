@@ -5,6 +5,11 @@ import re
 from collections.abc import Iterator
 from typing import Any
 
+from project_master.communication.interpretation import (
+    ConversationInterpretation,
+    interpret_conversation,
+)
+from project_master.core.audit import audit_response
 from project_master.core.cancellation import CancellationToken
 from project_master.core.models import Message, ToolExecution
 from project_master.core.prompting import PromptBuilder
@@ -39,14 +44,7 @@ class ProjectMasterAgent:
         self.max_history_messages = max_history_messages
 
     def respond(self, session_id: str, user_text: str) -> tuple[str, list[ToolExecution]]:
-        self.profiler.observe(user_text)
-        self.store.add_message(session_id, "user", user_text)
-        memory_context = self._memory_context(user_text)
-        system_prompt = self.prompt_builder.build(self.profiler.profile, memory_context)
-
-        history = self.store.recent_messages(session_id, self.max_history_messages)
-        messages = [Message(role="system", content=system_prompt)]
-        messages.extend(Message(role=item["role"], content=item["content"]) for item in history)
+        messages, interpretation = self._prepare_turn(session_id, user_text)
 
         executions: list[ToolExecution] = []
         for _round in range(self.max_tool_rounds):
@@ -54,7 +52,7 @@ class ProjectMasterAgent:
             messages.append(assistant)
 
             if not assistant.tool_calls:
-                final = assistant.content.strip() or "I could not produce a response."
+                final = self._guard_final_response(assistant.content, messages, interpretation)
                 self.store.add_message(session_id, "assistant", final)
                 return final, executions
 
@@ -79,13 +77,7 @@ class ProjectMasterAgent:
         cancellation: CancellationToken | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Run the normal agent loop while yielding observable progress events."""
-        self.profiler.observe(user_text)
-        self.store.add_message(session_id, "user", user_text)
-        memory_context = self._memory_context(user_text)
-        system_prompt = self.prompt_builder.build(self.profiler.profile, memory_context)
-        history = self.store.recent_messages(session_id, self.max_history_messages)
-        messages = [Message(role="system", content=system_prompt)]
-        messages.extend(Message(role=item["role"], content=item["content"]) for item in history)
+        messages, _interpretation = self._prepare_turn(session_id, user_text)
 
         for _round in range(self.max_tool_rounds):
             content_parts: list[str] = []
@@ -142,6 +134,66 @@ class ProjectMasterAgent:
         )
         self.store.add_message(session_id, "assistant", final)
         yield {"type": "done", "content": final}
+
+    def _prepare_turn(
+        self, session_id: str, user_text: str
+    ) -> tuple[list[Message], ConversationInterpretation]:
+        # Interpret against prior messages before appending the current one, so the distinction
+        # between established context and the present statement remains explicit.
+        history = self.store.recent_messages(session_id, self.max_history_messages)
+        interpretation = interpret_conversation(history, user_text)
+        self.profiler.observe(user_text)
+        self.store.add_message(session_id, "user", user_text)
+        memory_context = self._memory_context(user_text)
+        system_prompt = self.prompt_builder.build(
+            self.profiler.profile,
+            memory_context,
+            interpretation.prompt_summary(),
+        )
+        messages = [Message(role="system", content=system_prompt)]
+        messages.extend(Message(role=item["role"], content=item["content"]) for item in history)
+        messages.append(Message(role="user", content=user_text))
+        return messages, interpretation
+
+    def _guard_final_response(
+        self,
+        draft: str,
+        messages: list[Message],
+        interpretation: ConversationInterpretation,
+    ) -> str:
+        final = draft.strip() or "I could not produce a response."
+        findings = audit_response(final, interpretation)
+        repairable = [
+            item
+            for item in findings
+            if item.code
+            in {
+                "unsupported-user-attribution",
+                "contradicts-established-project-context",
+                "reintroduces-rejected-interpretation",
+                "unsolicited-advice",
+            }
+        ]
+        if not repairable:
+            return final
+
+        repair_prompt = Message(
+            role="system",
+            content=(
+                "Rewrite the draft response below before it is shown to the user. Return only the "
+                "replacement response. Preserve useful content, but remove unsupported "
+                "attributions, contradictions with established context, repeated rejected "
+                "interpretations, and advice that was not explicitly requested. Do not mention "
+                "this audit or claim the user said anything they did not explicitly say.\n\n"
+                "Draft response:\n"
+                f"{final}\n\n"
+                "Detected concerns:\n" + "\n".join(f"- {item.message}" for item in repairable)
+            ),
+        )
+        repaired = self.provider.chat([*messages, repair_prompt], tools=None)
+        if repaired.tool_calls or not repaired.content.strip():
+            return final
+        return repaired.content.strip()
 
     def _memory_context(self, user_text: str) -> str:
         terms = [word for word in user_text.split() if len(word) >= 5][:4]

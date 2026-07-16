@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -36,6 +36,18 @@ class ChatRequest(BaseModel):
 
 class ChatCancelRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class CommunicationFeedbackRequest(BaseModel):
+    category: Literal[
+        "preserve_semantic_fidelity",
+        "avoid_unjustified_assumptions",
+        "avoid_unsolicited_advice",
+        "avoid_unnecessary_repetition",
+        "use_context_before_interpreting",
+    ]
+    note: str = Field(min_length=1, max_length=2_000)
+    scope: Literal["global", "situational"] = "global"
 
 
 def create_app(runtime: MasterRuntime | None = None) -> FastAPI:
@@ -85,6 +97,20 @@ def create_app(runtime: MasterRuntime | None = None) -> FastAPI:
             "ollama_url": active.config.ollama_url,
             "ollama_reachable": reachable,
             "models": models,
+        }
+
+    @app.get("/api/v1/profile/communication")
+    def communication_profile() -> dict[str, Any]:
+        """Expose the local, auditable communication model for future interface controls."""
+
+        return active.profiler.profile.to_dict()
+
+    @app.post("/api/v1/profile/communication/feedback")
+    def communication_feedback(body: CommunicationFeedbackRequest) -> dict[str, Any]:
+        preference = active.profiler.record_feedback(body.category, body.note, body.scope)
+        return {
+            "preference": preference.to_dict(),
+            "profile": active.profiler.profile.to_dict(),
         }
 
     @app.post("/api/v1/conversations", status_code=201)

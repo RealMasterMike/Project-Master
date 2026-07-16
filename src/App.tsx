@@ -18,11 +18,15 @@ import {
   cancelChat,
   ensureManagedBackend,
   formatProjectMasterError,
+  getCommunicationProfile,
   getConversation,
   getModelStatus,
   isAbortError,
   listConversations,
+  submitCommunicationFeedback,
+  type CommunicationFeedbackCategory,
   type ProjectMasterConversation,
+  type ProjectMasterCommunicationProfile,
   ProjectMasterUnavailableError,
   streamChat,
   type ProjectMasterModel,
@@ -65,6 +69,10 @@ function App() {
   const [conversations, setConversations] = useState<ProjectMasterConversation[]>([]);
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationError, setConversationError] = useState<string | null>(null);
+  const [communicationProfile, setCommunicationProfile] =
+    useState<ProjectMasterCommunicationProfile | null>(null);
+  const [communicationLoading, setCommunicationLoading] = useState(false);
+  const [communicationError, setCommunicationError] = useState<string | null>(null);
   const [contextLength, setContextLength] = useState(32768);
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("checking");
@@ -76,6 +84,7 @@ function App() {
   const modelLoadControllerRef = useRef<AbortController | null>(null);
   const conversationListControllerRef = useRef<AbortController | null>(null);
   const conversationLoadControllerRef = useRef<AbortController | null>(null);
+  const communicationLoadControllerRef = useRef<AbortController | null>(null);
   const streamControllerRef = useRef<ActiveStream | null>(null);
   const retryRequestsRef = useRef(new Map<string, RetryRequest>());
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -102,6 +111,47 @@ function App() {
       }
     }
   }, []);
+
+  const loadCommunicationProfile = useCallback(async () => {
+    communicationLoadControllerRef.current?.abort();
+    const controller = new AbortController();
+    communicationLoadControllerRef.current = controller;
+    setCommunicationLoading(true);
+    setCommunicationError(null);
+
+    try {
+      const profile = await getCommunicationProfile(controller.signal);
+      if (!controller.signal.aborted) setCommunicationProfile(profile);
+    } catch (error) {
+      if (!controller.signal.aborted && !isAbortError(error)) {
+        setCommunicationError(formatProjectMasterError(error));
+      }
+    } finally {
+      if (communicationLoadControllerRef.current === controller) {
+        communicationLoadControllerRef.current = null;
+        setCommunicationLoading(false);
+      }
+    }
+  }, []);
+
+  const recordCommunicationFeedback = useCallback(
+    async (
+      category: CommunicationFeedbackCategory,
+      note: string,
+      scope: "global" | "situational",
+    ): Promise<void> => {
+      try {
+        const profile = await submitCommunicationFeedback(category, note, scope);
+        setCommunicationProfile(profile);
+        setCommunicationError(null);
+      } catch (error) {
+        const message = formatProjectMasterError(error);
+        setCommunicationError(message);
+        throw new Error(message);
+      }
+    },
+    [],
+  );
 
   const loadAvailableModels = useCallback(async () => {
     modelLoadControllerRef.current?.abort();
@@ -162,12 +212,15 @@ function App() {
       modelLoadControllerRef.current?.abort();
       conversationListControllerRef.current?.abort();
       conversationLoadControllerRef.current?.abort();
+      communicationLoadControllerRef.current?.abort();
     };
   }, [loadAvailableModels]);
 
   useEffect(() => {
-    if (connectionState === "ready") void loadConversations();
-  }, [connectionState, loadConversations]);
+    if (connectionState !== "ready") return;
+    void loadConversations();
+    void loadCommunicationProfile();
+  }, [connectionState, loadCommunicationProfile, loadConversations]);
 
   useEffect(() => {
     return () => {
@@ -443,7 +496,7 @@ function App() {
           />
           <span className="brand-copy">
             <span className="brand-name">MASTER</span>
-            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.2.0</span>
+            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.2.1</span>
           </span>
         </div>
 
@@ -638,6 +691,11 @@ function App() {
               onSave={layoutController.saveCurrent}
               onApplySaved={layoutController.applySaved}
               onDeleteSaved={layoutController.deleteSaved}
+              communicationProfile={communicationProfile}
+              communicationLoading={communicationLoading}
+              communicationError={communicationError}
+              onRefreshCommunication={() => void loadCommunicationProfile()}
+              onSubmitCommunicationFeedback={recordCommunicationFeedback}
             />
           </div>
         ) : null}

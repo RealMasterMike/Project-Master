@@ -5,6 +5,7 @@ The planned desktop application should remain a client of the Project Master cor
 Initial screens:
 
 - chat and tool activity;
+- communication-profile inspection and scoped correction controls;
 - claims and evidence ledger;
 - memory inspector and deletion controls;
 - task board;
@@ -17,6 +18,11 @@ The Python engine is exposed through a loopback HTTP service packaged as a PyIns
 Tauri starts it on `127.0.0.1:8765`, waits for readiness, and stops the full process tree when the
 desktop app exits. Desktop data lives under Tauri's per-user application-data directory. The CLI
 and standalone `master serve` entry point remain available for development and automation.
+
+The current **Communication** tab is deliberately a constrained local control surface. It can show
+active communication rules and submit a correction category plus a note to the loopback backend. It
+does not expose internal prompts, create durable factual memories, or grant the model authority to
+rewrite its own behavioral rules.
 
 Both the connection banner and conversation-level Retry paths must invoke Tauri's managed-backend
 command before retrying API work. A sidecar older than the startup grace period whose endpoint is

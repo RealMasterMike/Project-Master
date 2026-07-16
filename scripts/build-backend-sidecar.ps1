@@ -31,6 +31,23 @@ if ($LASTEXITCODE -ne 0) {
     throw "Installing backend packaging dependencies failed."
 }
 
+$desktopVersion = (Get-Content (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json).version
+$backendPackageVersion = (& $venvPython -c (
+    "from importlib.metadata import version; print(version('project-master-ai'))"
+)).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to read the installed backend package version."
+}
+$backendRuntimeVersion = (& $venvPython -c (
+    "import project_master; print(project_master.__version__)"
+)).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to read the backend runtime version."
+}
+if ($backendPackageVersion -ne $desktopVersion -or $backendRuntimeVersion -ne $desktopVersion) {
+    throw "Release version mismatch: desktop $desktopVersion, backend package $backendPackageVersion, backend runtime $backendRuntimeVersion."
+}
+
 $targetTriple = (& rustc --print host-tuple).Trim()
 if (-not $targetTriple) {
     throw "Unable to determine the Rust target triple."

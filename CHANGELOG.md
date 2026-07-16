@@ -2,6 +2,31 @@
 
 All notable Project Master desktop releases are recorded here.
 
+## 0.2.1 ALPHA — 2026-07-15
+
+### Changed
+
+- Added a conservative communication-fidelity foundation to the Python engine. It now preserves
+  literal user text alongside labeled intent, ambiguity, prior context, and response-planning data
+  before a model responds.
+- Replaced the profile's absence-based style assumptions with an auditable communication profile for
+  explicit preferences, corrections, disliked response patterns, source, confidence, examples,
+  scope, timestamps, and superseded records.
+- Added local communication-profile inspection and explicit feedback endpoints so a future interface
+  can show the profile and record a deliberate correction without converting it into a factual memory.
+- Added a local **Communication** tab to the desktop Customize panel. It shows active interaction
+  rules and records scoped corrections such as changed meaning, assumptions, unwanted advice,
+  repetition, or ignored context.
+- Added context-aware response checks for unsupported user attributions, reintroduced corrections,
+  contradictions with an existing project, unsolicited advice, unnecessary repetition, tone-based
+  invalidation, belief mirroring, and inference presented as fact. Non-streaming replies receive one
+  bounded repair attempt for material semantic-fidelity findings.
+
+### Verification
+
+- Focused backend communication, profile, audit, prompt, memory-authorization, and API tests passed.
+- Backend Ruff checks passed.
+
 ## 0.2.0 ALPHA — 2026-07-14
 
 ### Added

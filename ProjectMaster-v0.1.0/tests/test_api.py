@@ -87,6 +87,32 @@ def test_health_and_model_status(tmp_path: Path) -> None:
     assert status["models"] == ["test-model"]
 
 
+def test_communication_profile_and_explicit_feedback_api(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    client = TestClient(create_app(runtime))
+
+    profile = client.get("/api/v1/profile/communication")
+    assert profile.status_code == 200
+    assert any(item["key"] == "semantic_fidelity" for item in profile.json()["preferences"])
+
+    response = client.post(
+        "/api/v1/profile/communication/feedback",
+        json={
+            "category": "avoid_unsolicited_advice",
+            "note": "Analyze the question before recommending a next step.",
+            "scope": "global",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["preference"]["source"] == "explicit_user_feedback"
+    assert response.json()["preference"]["supporting_examples"] == [
+        "Analyze the question before recommending a next step."
+    ]
+    reloaded = StyleProfiler(runtime.store)
+    assert reloaded.profile.corrections[-1].preference_key == "avoid_unsolicited_advice"
+
+
 def test_chat_stream_persists_conversation(tmp_path: Path) -> None:
     client = TestClient(create_app(make_runtime(tmp_path)))
 

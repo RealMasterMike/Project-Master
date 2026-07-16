@@ -8,9 +8,11 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import {
   API_BASE_URL,
   cancelChat,
+  getCommunicationProfile,
   getConversation,
   listConversations,
   streamChat,
+  submitCommunicationFeedback,
 } from "./projectMasterApi";
 
 describe("Project Master stream cancellation protocol", () => {
@@ -108,5 +110,62 @@ describe("Project Master stream cancellation protocol", () => {
       `${API_BASE_URL}/conversations?limit=50`,
       `${API_BASE_URL}/conversations/conversation-1`,
     ]);
+  });
+
+  it("loads the communication profile and saves explicit feedback", async () => {
+    const profile = {
+      preferences: [
+        {
+          key: "semantic_fidelity",
+          value: "Preserve the user's actual meaning.",
+          source: "explicit_user_instruction",
+          confidence: 1,
+          scope: "global",
+          supporting_examples: [],
+          status: "active",
+        },
+      ],
+      disliked_response_patterns: ["unjustified assumptions"],
+      corrections: [],
+    };
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(profile), { status: 200 }));
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          preference: {
+            ...profile.preferences[0],
+            source: "explicit_user_feedback",
+            supporting_examples: ["Analyze before recommending."],
+          },
+          profile: {
+            ...profile,
+            corrections: [{ preference_key: "avoid_unsolicited_advice" }],
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(getCommunicationProfile()).resolves.toMatchObject({
+      correctionsCount: 0,
+      preferences: [{ key: "semantic_fidelity", source: "explicit_user_instruction" }],
+    });
+    await expect(
+      submitCommunicationFeedback(
+        "avoid_unsolicited_advice",
+        "Analyze before recommending.",
+      ),
+    ).resolves.toMatchObject({ correctionsCount: 1 });
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `${API_BASE_URL}/profile/communication`,
+      `${API_BASE_URL}/profile/communication/feedback`,
+    ]);
+    const [, feedbackRequest] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(String(feedbackRequest.body))).toEqual({
+      category: "avoid_unsolicited_advice",
+      note: "Analyze before recommending.",
+      scope: "global",
+    });
   });
 });

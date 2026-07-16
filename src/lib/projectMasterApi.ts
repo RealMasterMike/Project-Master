@@ -21,6 +21,29 @@ export interface ProjectMasterConversationMessage {
   content: string;
 }
 
+export type CommunicationFeedbackCategory =
+  | "preserve_semantic_fidelity"
+  | "avoid_unjustified_assumptions"
+  | "avoid_unsolicited_advice"
+  | "avoid_unnecessary_repetition"
+  | "use_context_before_interpreting";
+
+export interface ProjectMasterCommunicationPreference {
+  key: string;
+  value: string;
+  source: string;
+  confidence: number;
+  scope: "global" | "situational" | string;
+  supportingExamples: string[];
+  status: string;
+}
+
+export interface ProjectMasterCommunicationProfile {
+  preferences: ProjectMasterCommunicationPreference[];
+  dislikedResponsePatterns: string[];
+  correctionsCount: number;
+}
+
 interface ModelStatus {
   configured_model: string;
   num_ctx: number;
@@ -57,6 +80,24 @@ interface ConversationListResponse {
 interface ConversationResponse {
   id?: unknown;
   messages?: Array<{ role?: unknown; content?: unknown }>;
+}
+
+interface CommunicationProfileResponse {
+  preferences?: Array<{
+    key?: unknown;
+    value?: unknown;
+    source?: unknown;
+    confidence?: unknown;
+    scope?: unknown;
+    supporting_examples?: unknown;
+    status?: unknown;
+  }>;
+  disliked_response_patterns?: unknown;
+  corrections?: unknown;
+}
+
+interface CommunicationFeedbackResponse {
+  profile?: CommunicationProfileResponse;
 }
 
 export class ProjectMasterUnavailableError extends Error {
@@ -218,6 +259,77 @@ export async function getConversation(
     };
   });
   return { id: payload.id, messages };
+}
+
+export async function getCommunicationProfile(
+  signal?: AbortSignal,
+): Promise<ProjectMasterCommunicationProfile> {
+  const response = await request("/profile/communication", { signal });
+  await ensureSuccess(response);
+  return parseCommunicationProfile((await response.json()) as CommunicationProfileResponse);
+}
+
+export async function submitCommunicationFeedback(
+  category: CommunicationFeedbackCategory,
+  note: string,
+  scope: "global" | "situational" = "global",
+): Promise<ProjectMasterCommunicationProfile> {
+  const response = await request("/profile/communication/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ category, note, scope }),
+  });
+  await ensureSuccess(response);
+  const payload = (await response.json()) as CommunicationFeedbackResponse;
+  if (!payload.profile) {
+    throw new ProjectMasterProtocolError("Project Master returned invalid communication feedback.");
+  }
+  return parseCommunicationProfile(payload.profile);
+}
+
+function parseCommunicationProfile(
+  payload: CommunicationProfileResponse,
+): ProjectMasterCommunicationProfile {
+  if (!Array.isArray(payload.preferences)) {
+    throw new ProjectMasterProtocolError("Project Master returned an invalid communication profile.");
+  }
+  const preferences = payload.preferences.map((preference) => {
+    if (
+      typeof preference.key !== "string" ||
+      typeof preference.value !== "string" ||
+      typeof preference.source !== "string" ||
+      typeof preference.confidence !== "number" ||
+      typeof preference.scope !== "string" ||
+      !Array.isArray(preference.supporting_examples) ||
+      !preference.supporting_examples.every((example) => typeof example === "string") ||
+      typeof preference.status !== "string"
+    ) {
+      throw new ProjectMasterProtocolError(
+        "Project Master returned an invalid communication preference.",
+      );
+    }
+    return {
+      key: preference.key,
+      value: preference.value,
+      source: preference.source,
+      confidence: preference.confidence,
+      scope: preference.scope,
+      supportingExamples: preference.supporting_examples,
+      status: preference.status,
+    };
+  });
+  if (
+    !Array.isArray(payload.disliked_response_patterns) ||
+    !payload.disliked_response_patterns.every((pattern) => typeof pattern === "string") ||
+    !Array.isArray(payload.corrections)
+  ) {
+    throw new ProjectMasterProtocolError("Project Master returned an invalid communication profile.");
+  }
+  return {
+    preferences,
+    dislikedResponsePatterns: payload.disliked_response_patterns,
+    correctionsCount: payload.corrections.length,
+  };
 }
 
 function parseEvent(line: string, options: StreamChatOptions): boolean {
