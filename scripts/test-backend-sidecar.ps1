@@ -59,25 +59,26 @@ try {
     $process = Start-Process @startArgs
 
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    $status = $null
+    $schema = $null
     do {
         if ($process.HasExited) {
             throw "Backend sidecar exited early with code $($process.ExitCode)."
         }
         try {
-            $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/v1/models/status" -TimeoutSec 2
+            # Readiness must not depend on Ollama being installed or reachable.
+            $schema = Invoke-RestMethod -Uri "http://127.0.0.1:$port/openapi.json" -TimeoutSec 2
         } catch {
             Start-Sleep -Milliseconds 250
         }
-    } while (-not $status -and [DateTime]::UtcNow -lt $deadline)
+    } while (-not $schema -and [DateTime]::UtcNow -lt $deadline)
 
-    if (-not $status) {
+    if (-not $schema) {
         $logPath = Join-Path $testRoot "backend.log"
         $logText = if (Test-Path $logPath) { Get-Content -Raw $logPath } else { "No log created." }
         throw "Backend sidecar did not become ready within 30 seconds. $logText"
     }
-    if ($status.num_ctx -ne 32768) {
-        throw "Expected default context length 32768, received $($status.num_ctx)."
+    if ($schema.info.title -ne "Project Master Local API") {
+        throw "Backend sidecar returned an unexpected API schema."
     }
     if (-not (Test-Path (Join-Path $testRoot "master.db"))) {
         throw "Backend sidecar did not create its database in the configured data directory."
