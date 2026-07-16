@@ -13,6 +13,7 @@ import remarkGfm from "remark-gfm";
 import "./App.css";
 import { ConversationLibrary } from "./components/ConversationLibrary";
 import { LayoutCustomizer } from "./components/LayoutCustomizer";
+import { UpdateNotice } from "./components/UpdateNotice";
 import { useLayoutController } from "./hooks/useLayoutController";
 import {
   cancelChat,
@@ -496,7 +497,7 @@ function App() {
           />
           <span className="brand-copy">
             <span className="brand-name">MASTER</span>
-            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.2.1</span>
+            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.2.2</span>
           </span>
         </div>
 
@@ -558,6 +559,8 @@ function App() {
           ) : null}
         </div>
       </header>
+
+      <UpdateNotice isBusy={isStreaming} />
 
       <div className="workspace-shell" style={workspaceStyle}>
         <ConversationLibrary

@@ -2,6 +2,47 @@
 
 All notable Project Master desktop releases are recorded here.
 
+## 0.2.2 ALPHA — 2026-07-15
+
+### Added
+
+- Added signed in-app desktop updates with an explicit user confirmation before download, install,
+  and restart.
+- Added a daily update-check policy for alpha builds and a weekly policy for beta and stable builds.
+- Added an automated prerelease workflow that signs Windows updater artifacts and maintains a
+  rolling GitHub alpha update channel.
+
+### Changed
+
+- Existing v0.2.1 users must manually install v0.2.2 once to receive the updater. Beginning with
+  this release, future updates can be discovered and installed from within Project Master.
+
+### Security
+
+- Updater packages are signed with a dedicated password-protected Tauri key and verified against
+  the public key embedded in the desktop application before installation.
+
+### Known issues
+
+- Ollama and at least one compatible local model are still required.
+- The Windows installer is updater-signed but not Authenticode-signed, so Microsoft reputation
+  warnings can still appear during the initial manual installation.
+- Users on v0.2.1 or earlier cannot receive this release automatically and must install it manually
+  from GitHub once.
+
+### Verification
+
+- Backend Ruff checks passed and all 41 backend tests passed.
+- All 17 frontend tests, the production frontend build, and the high-severity npm audit passed with
+  zero reported vulnerabilities.
+- Rust formatting, strict Clippy checks, and all five native lifecycle/version tests passed.
+- The packaged v0.2.2 backend sidecar passed its health smoke test.
+- The exact NSIS and MSI installers built successfully with matching Tauri updater signatures and
+  SHA-256 checksums.
+- The NSIS installer upgraded the local installation in place; the installed v0.2.2 application
+  auto-started and cleanly stopped its packaged backend.
+- A live installed-app test through Ollama and `qwen3:8b` returned exactly `OLLAMA_V022_OK`.
+
 ## 0.2.1 ALPHA — 2026-07-15
 
 ### Changed
