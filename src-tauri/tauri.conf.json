@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Project Master",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.master.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Project Master — ALPHA v0.2.1",
+        "title": "Project Master — ALPHA v0.2.2",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,
@@ -29,6 +29,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -40,5 +41,16 @@
     "externalBin": [
       "binaries/project-master-backend"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRGNjkwMTgyNzA1REE2OTYKUldTV3BsMXdnZ0ZwVHpWVy9iNVF1Y042OWJqejc3NlNxazNLSWRSbUYyMWVRUHhpbHRtVjFEbmMK",
+      "endpoints": [
+        "https://github.com/RealMasterMike/Project-Master/releases/download/updater-alpha/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

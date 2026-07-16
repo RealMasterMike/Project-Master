@@ -1,4 +1,4 @@
-# Project Master — ALPHA v0.2.1
+# Project Master — ALPHA v0.2.2
 
 [Watch Master Mike on YouTube](https://www.youtube.com/@RealMasterMike?sub_confirmation=1) ·
 [Creator links](https://linktr.ee/realmastermike) ·
@@ -38,9 +38,13 @@ The installer does **not** require Python, Node.js, or Rust. End users need:
 2. At least one Ollama chat model, for example `ollama pull qwen3:8b`
 3. Microsoft Edge WebView2 Runtime (already present on most current Windows systems)
 
-Install `Project-Master-ALPHA-v0.2.1-x64-setup.exe`, start Ollama, and open Project Master from the Start
+Install `Project-Master-ALPHA-v0.2.2-x64-setup.exe`, start Ollama, and open Project Master from the Start
 menu. The desktop app launches its bundled Python engine in the background and shuts it down when
 the app exits. If that engine crashes, the inline Retry action starts a replacement.
+
+> **Updater notice:** v0.2.1 does not include automatic updates. To get the updater, manually
+> download and install the latest Project Master release from GitHub when it becomes available.
+> Once an updater-enabled release is installed, future updates can be installed from within the app.
 
 Project Master stores its desktop database, configuration, workspace, and `backend.log` under the
 current user's application-data directory rather than inside the installation folder.
