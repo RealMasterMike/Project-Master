@@ -172,8 +172,10 @@ been uploaded or approved for public release; the release gate below still appli
   SuperGemma completed in 28,325 ms, both voice engines rendered checksum-verified WAVs, and final
   cleanup left no Ollama or backend process resident. The RPM remains uninstalled and Mike's short
   GUI daily-driver pass is still required before public release.
-- Public release remains blocked on Mike's GUI daily-driver pass, intentional review/commit of the
-  dirty source state, and version-matched release/signing decisions. No tag or upload is authorized.
+- Mike explicitly authorized shipping on 2026-07-27 after his supervised GUI pass surfaced and
+  verified fixes on the final candidate. The v0.3.0 tag and GitHub pre-release were published with
+  the accepted AppImage, unsigned RPM, and SHA-256 manifest. GitHub renames the RPM asset's space
+  to a period (`Project.Master-0.3.0-1.x86_64.rpm`); its hash matches the manifest entry.
 
 ## 0.2.2 ALPHA — 2026-07-15
 

@@ -3,23 +3,27 @@
 Last updated: 2026-07-27  
 Repository: `/home/mike/Project-Master`  
 Target: Fedora Linux daily-driver beta  
-Release state: **local candidate only — do not publish yet**
+Release state: **SHIPPED — v0.3.0 published 2026-07-27 with Mike's explicit authorization**  
+Release URL: https://github.com/RealMasterMike/Project-Master/releases/tag/v0.3.0
 
-## Immediate next action for Claude
+## Release record
 
-Do not rebuild or modify the accepted candidate. The current candidate was rebuilt on 2026-07-27
-after Mike's in-progress GUI pass surfaced fixes and he directed new features. It contains, beyond
-the original v0.3.0 scope: the thinking-mode prompt policy, the Linux
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` launcher fix (blank window on this hybrid Intel/NVIDIA Wayland
-machine), the Mission view for Team runs with a Mission/Transcript toggle, black dropdown-option
-text (WebKitGTK light popup), a truthful interactive-inference busy message with a 15 s lease
-wait, and the Linux quit process-tree fix that stops the PyInstaller sidecar from orphaning the
-real server on port 8765. Its headless gate passed **27/27 checks** with **12/12 physical Ollama
-models**, including the 26B model, and left the GUI, backend, and Ollama runners closed. Mike's
-GUI pass on this exact build still needs to finish (Binder citation, mutation toggle, Dream,
-voice render, and especially quit → relaunch, which exercises the new quit fix). Do not commit,
-tag, sign, install the RPM, upload, or publish unless Mike separately and explicitly authorizes
-that action.
+v0.3.0 shipped on 2026-07-27: Mike said "ship it" after his supervised GUI pass. Commit `b6716e9`
+on `main`, annotated tag `v0.3.0`, GitHub pre-release with the accepted AppImage, unsigned RPM,
+and SHA-256 manifest. GitHub stores the RPM asset as `Project.Master-0.3.0-1.x86_64.rpm` (space
+became a period); its hash matches the manifest.
+
+The shipped candidate contains, beyond the original v0.3.0 scope: the thinking-mode prompt
+policy, the Linux `WEBKIT_DISABLE_DMABUF_RENDERER=1` launcher fix (blank window on this hybrid
+Intel/NVIDIA Wayland machine), the Mission view for Team runs with a Mission/Transcript toggle,
+black dropdown-option text (WebKitGTK light popup), a truthful interactive-inference busy message
+with a 15 s lease wait, and the Linux quit process-tree fix that stops the PyInstaller sidecar
+from orphaning the real server on port 8765. Its headless gate passed **27/27 checks** with
+**12/12 physical Ollama models**.
+
+Next: Mike daily-drives the released build; findings feed v0.3.1 (see `ideas.md`, including
+inference-settings drop-downs). Signing/updater provisioning and Windows validation remain open
+follow-ups.
 
 ## Read this first
 
