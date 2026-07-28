@@ -61,6 +61,8 @@ $workRoot = Join-Path $buildRoot "work"
 $specRoot = Join-Path $buildRoot "spec"
 $binaryRoot = Join-Path $repoRoot "src-tauri\binaries"
 $entryPoint = Join-Path $backendRoot "src\project_master\sidecar.py"
+$chatterboxWorker = Join-Path $backendRoot "src\project_master\integrations\voice\chatterbox_worker.py"
+$workerData = "$chatterboxWorker$([IO.Path]::PathSeparator)project_master_worker_data"
 
 New-Item -ItemType Directory -Force $distRoot, $workRoot, $specRoot, $binaryRoot | Out-Null
 
@@ -70,6 +72,7 @@ $pyInstallerArgs = @(
     "--onefile",
     "--name", "project-master-backend",
     "--collect-data", "project_master",
+    "--add-data", $workerData,
     "--distpath", $distRoot,
     "--workpath", $workRoot,
     "--specpath", $specRoot,

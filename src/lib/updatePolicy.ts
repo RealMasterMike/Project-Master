@@ -1,6 +1,6 @@
 export type ReleaseStage = "alpha" | "beta" | "stable";
 
-export const CURRENT_RELEASE_STAGE: ReleaseStage = "alpha";
+export const CURRENT_RELEASE_STAGE: ReleaseStage = "beta";
 export const DAILY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 export const WEEKLY_UPDATE_CHECK_INTERVAL_MS = 7 * DAILY_UPDATE_CHECK_INTERVAL_MS;
 

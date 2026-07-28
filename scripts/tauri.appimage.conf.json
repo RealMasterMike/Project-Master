@@ -1,0 +1,13 @@
+{
+  "productName": "master",
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/share/applications/master.desktop": "linux/project-master-appimage.desktop"
+        }
+      }
+    }
+  }
+}

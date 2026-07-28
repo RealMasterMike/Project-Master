@@ -30,12 +30,16 @@ def build_registry(
     allow_file_writes: bool = False,
 ) -> ToolRegistry:
     registry = ToolRegistry()
-    root = workspace_root.resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    default_root = workspace_root.resolve()
+    default_root.mkdir(parents=True, exist_ok=True)
+
+    def active_root() -> Path:
+        return registry.workspace_root or default_root
 
     registry.register(
         Tool(
             name="calculator",
+            mutating=False,
             description="Evaluate a basic arithmetic expression safely.",
             parameters={
                 "type": "object",
@@ -50,6 +54,7 @@ def build_registry(
     registry.register(
         Tool(
             name="current_time",
+            mutating=False,
             description="Return the local machine date and time in ISO 8601 format.",
             parameters={"type": "object", "properties": {}, "additionalProperties": False},
             handler=lambda _args: {"local_time": datetime.now().astimezone().isoformat()},
@@ -57,6 +62,7 @@ def build_registry(
     )
 
     def workspace_list(args: dict[str, Any]) -> dict[str, Any]:
+        root = active_root()
         target = _safe_path(root, str(args.get("path", ".")))
         if not target.exists():
             raise FileNotFoundError(target)
@@ -80,6 +86,7 @@ def build_registry(
     registry.register(
         Tool(
             name="workspace_list",
+            mutating=False,
             description=(
                 "List files and directories inside the configured Project Master workspace."
             ),
@@ -96,6 +103,7 @@ def build_registry(
     )
 
     def workspace_read(args: dict[str, Any]) -> dict[str, Any]:
+        root = active_root()
         target = _safe_path(root, str(args["path"]))
         if not target.is_file():
             raise FileNotFoundError(target)
@@ -110,6 +118,7 @@ def build_registry(
     registry.register(
         Tool(
             name="workspace_read",
+            mutating=False,
             description="Read a UTF-8 text file inside the configured workspace.",
             parameters={
                 "type": "object",
@@ -122,6 +131,7 @@ def build_registry(
     )
 
     def workspace_write(args: dict[str, Any]) -> dict[str, Any]:
+        root = active_root()
         if not allow_file_writes:
             raise PermissionError(
                 "Workspace writes are disabled. Set MASTER_ALLOW_FILE_WRITES=true to enable them."
@@ -145,6 +155,7 @@ def build_registry(
     registry.register(
         Tool(
             name="workspace_write",
+            mutating=True,
             description=(
                 "Write a UTF-8 text file inside the configured workspace when writes are enabled."
             ),
@@ -182,6 +193,7 @@ def build_registry(
     registry.register(
         Tool(
             name="memory_remember",
+            mutating=True,
             description=(
                 "Store durable context with provenance. Use for preferences or project decisions; "
                 "do not treat memory as proof of an external claim."
@@ -215,6 +227,7 @@ def build_registry(
     registry.register(
         Tool(
             name="memory_recall",
+            mutating=False,
             description="Search stored context by text and optional namespace.",
             parameters={
                 "type": "object",
@@ -249,6 +262,7 @@ def build_registry(
     registry.register(
         Tool(
             name="claim_record",
+            mutating=True,
             description=(
                 "Record a claim in the evidence ledger without automatically treating it as true."
             ),
@@ -287,6 +301,7 @@ def build_registry(
     registry.register(
         Tool(
             name="evidence_add",
+            mutating=True,
             description=(
                 "Attach supporting, contradicting, or contextual evidence to a recorded claim."
             ),
@@ -310,6 +325,7 @@ def build_registry(
     registry.register(
         Tool(
             name="claims_list",
+            mutating=False,
             description="List recorded claims and their evidence from the evidence ledger.",
             parameters={
                 "type": "object",

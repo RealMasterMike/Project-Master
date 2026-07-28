@@ -1,6 +1,14 @@
 # Custom AI Agent — Design Brief
 
-This document is the shared design source of truth for every AI collaborating on the project.
+> **v0.3 scope note:** This document preserves the original single-agent MVP brief and its
+> historical product constraints. It is not the current release checklist. Current implementation
+> scope and release status live in [`ProjectMaster-v0.1.0/ROADMAP.md`](ProjectMaster-v0.1.0/ROADMAP.md)
+> and [`CHANGELOG.md`](CHANGELOG.md); product decisions live in [`approvals.md`](approvals.md), where
+> only entries Mike has formally marked `APPROVED` are binding. When this historical brief describes
+> an earlier platform order, milestone, or capability state, the current roadmap, changelog, and
+> approved decisions control.
+
+This document is the original shared design brief for the AIs collaborating on the project.
 
 > **Decisions locked so far:** local-first do-anything agent, running models through Ollama, "powerful pro-tool" feel, dark theme built on the owner's channel colors, Windows-first (then Linux/Mac), fully customizable layout as a headline feature. First release = a working chat loop that can execute tool calls.
 >

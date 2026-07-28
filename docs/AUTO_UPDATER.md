@@ -1,14 +1,23 @@
 # Automatic updates
 
-Project Master uses Tauri's signed desktop updater. The application checks the rolling alpha
-channel in the background eight seconds after startup, but it records each attempt before making
-the network request so an offline computer is not queried again on every launch.
+Project Master uses Tauri's signed desktop updater. The v0.3.0 beta candidate checks the configured
+rolling beta channel in the background eight seconds after startup, but records each attempt before
+making the network request so an offline computer is not queried again on every launch.
+
+> **Beta channel not yet provisioned:** the desktop is configured for `updater-beta`, but the
+> repository currently contains only the historical Windows alpha publishing workflow. Until a
+> signed, version-matched beta channel is created and tested, v0.3.0 must be installed and upgraded
+> manually. Do not point the beta candidate back at the alpha channel.
 
 ## Bootstrap requirement
 
-The public v0.2.1 build does not contain the updater. Existing users must manually download and
-install the latest Project Master release from GitHub once to receive the updater. Automatic checks
-and in-app installation are available only after that first updater-enabled version is installed.
+The public v0.2.1 build does not contain the updater. v0.2.2 contains the updater but watches
+`updater-alpha`; it will not discover a release published only to `updater-beta`. Existing alpha
+users must therefore install the first v0.3.0 beta manually unless a reviewed migration notice is
+published through the alpha channel.
+
+Linux updater artifacts are not currently published at all. The first Fedora beta remains a manual
+RPM/AppImage installation until the beta workflow builds, signs, and tests Linux update artifacts.
 
 ## Check cadence
 
@@ -17,8 +26,8 @@ and in-app installation are available only after that first updater-enabled vers
 - The release stage is explicit in `src/lib/updatePolicy.ts`; Project Master never guesses maturity
   from commit activity or elapsed time.
 
-When the project is ready to move beyond alpha, change `CURRENT_RELEASE_STAGE` and move the updater
-endpoint in `src-tauri/tauri.conf.json` to the matching release channel as part of the same release.
+`CURRENT_RELEASE_STAGE` and the endpoint in `src-tauri/tauri.conf.json` must always name the same
+release channel. Moving to stable later requires changing and testing both in the same release.
 
 ## Security model
 
@@ -35,13 +44,16 @@ key and password as the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_K
 secrets before the publishing workflow can run. Back up both in a secure credential vault: losing
 either prevents existing installations from trusting future updates.
 
-## Publishing an alpha update
+## Historical alpha publishing path
 
-1. Update every Project Master version source and add the versioned changelog entry.
-2. Merge the tested change to the release commit.
-3. Push a matching tag such as `v0.2.2-alpha`.
-4. The `Publish signed alpha update` workflow builds and signs the Windows installer, keeps the
-   GitHub Release marked as a prerelease, and replaces `latest.json` on the `updater-alpha` channel.
+The existing `Publish signed alpha update` workflow accepts tags such as `v0.2.2-alpha`, builds and
+signs the Windows installer, keeps the GitHub Release marked as a prerelease, and replaces
+`latest.json` on the `updater-alpha` channel. It is retained for historical alpha maintenance and
+does not publish the v0.3.0 beta.
+
+Before enabling beta updates, add a separately reviewed workflow that requires the `0.3.0 BETA RC`
+changelog contract, builds the intended operating-system artifacts, verifies their signatures and
+checksums, publishes only from an explicit beta tag, and maintains `updater-beta/latest.json`.
 
 The updater only checks and prompts automatically. Download, installation, and restart require the
 user to choose **Update and restart**. It will not interrupt an active model response.

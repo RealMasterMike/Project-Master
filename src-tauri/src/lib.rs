@@ -20,9 +20,18 @@ const BACKEND_START_GRACE: Duration = Duration::from_secs(5);
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
 const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[derive(Default)]
 struct BackendState {
     child: Mutex<Option<ManagedBackend>>,
+    session_token: String,
+}
+
+impl BackendState {
+    fn new() -> Result<Self, String> {
+        Ok(Self {
+            child: Mutex::new(None),
+            session_token: generate_session_token()?,
+        })
+    }
 }
 
 struct ManagedBackend {
@@ -44,6 +53,7 @@ struct BackendPaths {
 struct BackendStatus {
     ready: bool,
     started: bool,
+    session_token: String,
 }
 
 fn backend_address() -> SocketAddr {
@@ -64,7 +74,17 @@ fn endpoint_is_open(address: SocketAddr) -> bool {
     TcpStream::connect_timeout(&address, BACKEND_CONNECT_TIMEOUT).is_ok()
 }
 
-fn active_backend_version(address: SocketAddr) -> Result<Option<String>, String> {
+fn generate_session_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("Unable to generate a backend session token: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn active_backend_version(
+    address: SocketAddr,
+    session_token: &str,
+) -> Result<Option<String>, String> {
     let mut stream = TcpStream::connect_timeout(&address, BACKEND_CONNECT_TIMEOUT)
         .map_err(|error| format!("Unable to inspect the local backend: {error}"))?;
     stream
@@ -73,8 +93,12 @@ fn active_backend_version(address: SocketAddr) -> Result<Option<String>, String>
     stream
         .set_write_timeout(Some(BACKEND_RESPONSE_TIMEOUT))
         .map_err(|error| format!("Unable to set the backend write timeout: {error}"))?;
+    let request = format!(
+        "GET /api/v1/ready HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+         X-Project-Master-Token: {session_token}\r\nConnection: close\r\n\r\n"
+    );
     stream
-        .write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .write_all(request.as_bytes())
         .map_err(|error| format!("Unable to query the local backend: {error}"))?;
 
     let mut response = String::new();
@@ -96,10 +120,15 @@ fn backend_version_matches_current(version: Option<&str>) -> bool {
     version == Some(env!("CARGO_PKG_VERSION"))
 }
 
-fn wait_for_endpoint(address: SocketAddr, timeout: Duration) -> bool {
+fn wait_for_backend_ready(address: SocketAddr, session_token: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if endpoint_is_open(address) {
+        if active_backend_version(address, session_token)
+            .ok()
+            .flatten()
+            .as_deref()
+            .is_some_and(|version| backend_version_matches_current(Some(version)))
+        {
             return true;
         }
         if Instant::now() >= deadline {
@@ -109,13 +138,66 @@ fn wait_for_endpoint(address: SocketAddr, timeout: Duration) -> bool {
     }
 }
 
+fn wait_for_endpoint_closed(address: SocketAddr, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !endpoint_is_open(address) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn backend_can_be_replaced(uptime: Duration) -> bool {
     uptime >= BACKEND_START_GRACE
 }
 
 fn start_backend(app: &AppHandle) -> Result<bool, String> {
+    let state = app.state::<BackendState>();
+    let mut child_slot = state
+        .child
+        .lock()
+        .map_err(|_| "Project Master backend state is unavailable.".to_string())?;
+    if let Some(managed_backend) = child_slot.as_ref() {
+        let uptime = managed_backend.started_at.elapsed();
+        if !backend_can_be_replaced(uptime) || uptime < BACKEND_START_TIMEOUT {
+            return Ok(false);
+        }
+        if endpoint_is_open(backend_address()) {
+            let version = active_backend_version(backend_address(), &state.session_token);
+            if matches!(
+                version,
+                Ok(Some(ref current))
+                    if backend_version_matches_current(Some(current.as_str()))
+            ) {
+                return Ok(false);
+            }
+        }
+
+        let stale_backend = child_slot
+            .take()
+            .expect("managed backend was present while replacing it");
+        drop(child_slot);
+        terminate_process_tree(stale_backend.child);
+        if !wait_for_endpoint_closed(backend_address(), BACKEND_RESPONSE_TIMEOUT) {
+            return Err(
+                "The previous Project Master backend did not release its loopback port."
+                    .to_string(),
+            );
+        }
+        child_slot = state
+            .child
+            .lock()
+            .map_err(|_| "Project Master backend state is unavailable.".to_string())?;
+        if child_slot.is_some() {
+            return Ok(false);
+        }
+    }
     if endpoint_is_open(backend_address()) {
-        let version = active_backend_version(backend_address())?;
+        let version = active_backend_version(backend_address(), &state.session_token)?;
         if backend_version_matches_current(version.as_deref()) {
             return Ok(false);
         }
@@ -124,30 +206,6 @@ fn start_backend(app: &AppHandle) -> Result<bool, String> {
             "An incompatible Project Master backend ({description}) is already using \
              127.0.0.1:{BACKEND_PORT}. Close the other Project Master window, then choose Retry."
         ));
-    }
-
-    let state = app.state::<BackendState>();
-    let mut child_slot = state
-        .child
-        .lock()
-        .map_err(|_| "Project Master backend state is unavailable.".to_string())?;
-    if let Some(managed_backend) = child_slot.as_ref() {
-        if !backend_can_be_replaced(managed_backend.started_at.elapsed()) {
-            return Ok(false);
-        }
-
-        let stale_backend = child_slot
-            .take()
-            .expect("managed backend was present while replacing it");
-        drop(child_slot);
-        terminate_process_tree(stale_backend.child);
-        child_slot = state
-            .child
-            .lock()
-            .map_err(|_| "Project Master backend state is unavailable.".to_string())?;
-        if child_slot.is_some() {
-            return Ok(false);
-        }
     }
 
     let data_dir = app
@@ -166,8 +224,12 @@ fn start_backend(app: &AppHandle) -> Result<bool, String> {
         .env("MASTER_CONFIG", &paths.config_path)
         .env("MASTER_DB_PATH", &paths.database_path)
         .env("MASTER_WORKSPACE_ROOT", &paths.workspace_path)
+        .env("MASTER_ALLOW_FILE_WRITES", "true")
+        .env("MASTER_TERMINAL_ENABLED", "true")
+        .env("MASTER_TERMINAL_NETWORK_ENABLED", "false")
         .env("MASTER_LOG_PATH", &paths.log_path)
-        .env("MASTER_API_PORT", BACKEND_PORT.to_string());
+        .env("MASTER_API_PORT", BACKEND_PORT.to_string())
+        .env("MASTER_SESSION_TOKEN", &state.session_token);
 
     let (mut events, child) = sidecar
         .spawn()
@@ -243,14 +305,65 @@ fn terminate_process_tree(child: CommandChild) {
 
 #[cfg(not(target_os = "windows"))]
 fn terminate_process_tree(child: CommandChild) {
+    // The PyInstaller sidecar forks the real server process. Killing only the
+    // launcher orphans that server and leaves it holding the backend port, so
+    // collect the descendants first, stop the launcher, then terminate them.
+    let descendants = collect_descendant_pids(child.pid());
     let _ = child.kill();
+    for pid in descendants {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn collect_descendant_pids(root: u32) -> Vec<u32> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    descendants_of(
+        &parse_process_table(&String::from_utf8_lossy(&output.stdout)),
+        root,
+    )
+}
+
+fn parse_process_table(table: &str) -> Vec<(u32, u32)> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            Some((pid, ppid))
+        })
+        .collect()
+}
+
+fn descendants_of(edges: &[(u32, u32)], root: u32) -> Vec<u32> {
+    let mut result: Vec<u32> = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for &(pid, ppid) in edges {
+            if ppid == parent && pid != root && !result.contains(&pid) {
+                result.push(pid);
+                frontier.push(pid);
+            }
+        }
+    }
+    result
 }
 
 #[tauri::command]
 async fn ensure_backend(app: AppHandle) -> Result<BackendStatus, String> {
     let started = start_backend(&app)?;
-    let ready = tauri::async_runtime::spawn_blocking(|| {
-        wait_for_endpoint(backend_address(), BACKEND_START_TIMEOUT)
+    let session_token = app.state::<BackendState>().session_token.clone();
+    let readiness_token = session_token.clone();
+    let ready = tauri::async_runtime::spawn_blocking(move || {
+        wait_for_backend_ready(backend_address(), &readiness_token, BACKEND_START_TIMEOUT)
     })
     .await
     .map_err(|error| format!("Backend readiness check failed: {error}"))?;
@@ -269,17 +382,28 @@ async fn ensure_backend(app: AppHandle) -> Result<BackendStatus, String> {
     Ok(BackendStatus {
         ready: true,
         started,
+        session_token,
     })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK's DMA-BUF renderer produces a blank window on hybrid Intel/NVIDIA
+    // Wayland systems ("Failed to create GBM buffer"). Disable it unless the user
+    // has explicitly configured the variable themselves.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
+    let backend_state =
+        BackendState::new().expect("unable to create the Project Master backend session");
     let app = builder
-        .manage(BackendState::default())
+        .manage(backend_state)
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![ensure_backend])
@@ -314,6 +438,31 @@ mod tests {
         assert_eq!(paths.database_path, base.join("master.db"));
         assert_eq!(paths.workspace_path, base.join("workspace"));
         assert_eq!(paths.log_path, base.join("backend.log"));
+    }
+
+    #[test]
+    fn process_table_parsing_skips_malformed_lines() {
+        let table = "  10   1\n 20  10\nbad line\n 30  20\n";
+        assert_eq!(
+            parse_process_table(table),
+            vec![(10, 1), (20, 10), (30, 20)]
+        );
+    }
+
+    #[test]
+    fn descendant_walk_finds_the_whole_subtree_and_nothing_else() {
+        let edges = [(10, 1), (20, 10), (30, 20), (40, 10), (99, 2)];
+        let mut found = descendants_of(&edges, 10);
+        found.sort_unstable();
+        assert_eq!(found, vec![20, 30, 40]);
+        assert!(descendants_of(&edges, 99).is_empty());
+    }
+
+    #[test]
+    fn descendant_walk_survives_pid_cycles() {
+        let edges = [(10, 20), (20, 10)];
+        let found = descendants_of(&edges, 10);
+        assert_eq!(found, vec![20]);
     }
 
     #[test]

@@ -12,9 +12,17 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
 import { ConversationLibrary } from "./components/ConversationLibrary";
+import { FeatureWorkspace } from "./components/FeatureWorkspace";
 import { LayoutCustomizer } from "./components/LayoutCustomizer";
+import { MissionView } from "./components/MissionView";
+import { RunRail, TeamStrip } from "./components/TeamRunPanel";
 import { UpdateNotice } from "./components/UpdateNotice";
+import {
+  WorkspaceNavigation,
+  type MasterWorkspace,
+} from "./components/WorkspaceNavigation";
 import { useLayoutController } from "./hooks/useLayoutController";
+import { withCurrentMutationAuthorization } from "./lib/chatAuthorization";
 import {
   cancelChat,
   ensureManagedBackend,
@@ -24,11 +32,16 @@ import {
   getModelStatus,
   isAbortError,
   listConversations,
+  listProjects,
   submitCommunicationFeedback,
   type CommunicationFeedbackCategory,
+  type ProjectMasterChatMode,
   type ProjectMasterConversation,
   type ProjectMasterCommunicationProfile,
   ProjectMasterUnavailableError,
+  type ProjectMasterRunActivity,
+  type ProjectMasterTeamCatalogModel,
+  type MasterProject,
   streamChat,
   type ProjectMasterModel,
 } from "./lib/projectMasterApi";
@@ -47,6 +60,9 @@ interface UiMessage {
 interface RetryRequest {
   model: string;
   message: string;
+  mode: ProjectMasterChatMode;
+  allowMutations: boolean;
+  projectId?: string;
   conversationId?: string;
 }
 
@@ -65,6 +81,17 @@ function createMessageId(role: UiMessage["role"]): string {
 function App() {
   const layoutController = useLayoutController();
   const [models, setModels] = useState<ProjectMasterModel[]>([]);
+  const [binderProjects, setBinderProjects] = useState<MasterProject[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [teamCatalog, setTeamCatalog] = useState<ProjectMasterTeamCatalogModel[]>([]);
+  const [chatMode, setChatMode] = useState<ProjectMasterChatMode>("team");
+  // Deliberately session-only: never read from or write to persistent storage.
+  const [allowMutations, setAllowMutations] = useState(false);
+  const [teamAvailable, setTeamAvailable] = useState(false);
+  const [runActivities, setRunActivities] = useState<ProjectMasterRunActivity[]>([]);
+  const [activeRunId, setActiveRunId] = useState<string>();
+  const [teamView, setTeamView] = useState<"mission" | "transcript">("mission");
+  const [activeWorkspace, setActiveWorkspace] = useState<MasterWorkspace>("chat");
   const [selectedModel, setSelectedModel] = useState("");
   const [conversationId, setConversationId] = useState<string>();
   const [conversations, setConversations] = useState<ProjectMasterConversation[]>([]);
@@ -166,22 +193,34 @@ function App() {
       await ensureManagedBackend();
       const status = await getModelStatus(controller.signal);
       const availableModels = status.models;
+      const conversationalModels = availableModels.filter(
+        (model) => model.conversational,
+      );
       if (controller.signal.aborted) {
         return;
       }
 
       setModels(availableModels);
       setSelectedModel((currentModel) => {
-        if (availableModels.some((model) => model.name === currentModel)) {
+        if (
+          conversationalModels.some((model) => model.name === currentModel)
+        ) {
           return currentModel;
         }
-        return availableModels.some((model) => model.name === status.configuredModel)
+        return conversationalModels.some(
+          (model) => model.name === status.configuredModel,
+        )
           ? status.configuredModel
-          : availableModels[0]?.name ?? "";
+          : conversationalModels[0]?.name ?? "";
       });
       setContextLength(status.contextLength);
+      setTeamCatalog(status.teamCatalog);
+      setTeamAvailable(status.teamAvailable);
+      setChatMode((currentMode) =>
+        currentMode === "team" && !status.teamAvailable ? "direct" : currentMode,
+      );
       setConnectionState(
-        status.ollamaReachable && availableModels.length > 0
+        status.ollamaReachable && conversationalModels.length > 0
           ? "ready"
           : status.ollamaReachable
             ? "empty"
@@ -196,6 +235,9 @@ function App() {
       }
 
       setModels([]);
+      setTeamCatalog([]);
+      setTeamAvailable(false);
+      setChatMode("direct");
       setSelectedModel("");
       setConnectionState("offline");
       setConnectionError(formatProjectMasterError(error));
@@ -221,6 +263,16 @@ function App() {
     if (connectionState !== "ready") return;
     void loadConversations();
     void loadCommunicationProfile();
+    void listProjects()
+      .then((projects) => {
+        setBinderProjects(projects);
+        setSelectedProjectId((current) =>
+          !current || projects.some((project) => project.id === current)
+            ? current
+            : "",
+        );
+      })
+      .catch(() => undefined);
   }, [connectionState, loadCommunicationProfile, loadConversations]);
 
   useEffect(() => {
@@ -263,9 +315,17 @@ function App() {
         requestId,
         model: request.model,
         message: request.message,
+        mode: request.mode,
+        allowMutations: request.allowMutations,
+        projectId: request.projectId,
         conversationId: request.conversationId,
         signal: controller.signal,
         onConversation: setConversationId,
+        onRun: setActiveRunId,
+        onActivity: (activity) => {
+          if (controller.signal.aborted) return;
+          setRunActivities((current) => [...current, activity].slice(-60));
+        },
         onToken: (token) => {
           if (controller.signal.aborted) {
             return;
@@ -352,9 +412,15 @@ function App() {
     const request: RetryRequest = {
       model: selectedModel,
       message: content,
+      mode: chatMode,
+      allowMutations,
+      projectId: selectedProjectId || undefined,
       conversationId,
     };
 
+    setRunActivities([]);
+    setActiveRunId(undefined);
+    if (chatMode === "team") setTeamView("mission");
     setMessages((currentMessages) => [
       ...currentMessages,
       userMessage,
@@ -402,12 +468,16 @@ function App() {
     if (isStreaming) return;
     setConversationId(undefined);
     setMessages([]);
+    setRunActivities([]);
+    setActiveRunId(undefined);
     setComposer("");
+    setAllowMutations(false);
     resetComposerHeight();
   }
 
   async function openConversation(id: string): Promise<void> {
     if (isStreaming || id === conversationId) return;
+    setAllowMutations(false);
     conversationLoadControllerRef.current?.abort();
     const controller = new AbortController();
     conversationLoadControllerRef.current = controller;
@@ -418,6 +488,8 @@ function App() {
       const conversation = await getConversation(id, controller.signal);
       if (controller.signal.aborted) return;
       setConversationId(conversation.id);
+      setRunActivities([]);
+      setActiveRunId(undefined);
       setMessages(
         conversation.messages.map((message) => ({
           id: createMessageId(message.role),
@@ -448,7 +520,10 @@ function App() {
       setConnectionState("checking");
       try {
         await ensureManagedBackend();
-        await runAssistantResponse(messageId, request);
+        await runAssistantResponse(
+          messageId,
+          withCurrentMutationAuthorization(request, allowMutations),
+        );
       } catch (error) {
         const displayError = formatProjectMasterError(error);
         setConnectionState("offline");
@@ -463,21 +538,44 @@ function App() {
     }
   }
 
-  const canSend = Boolean(composer.trim() && selectedModel && !isStreaming);
+  const selectedModelInfo = models.find(
+    (model) => model.name === selectedModel,
+  );
+  const lastUserMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
+  const lastAssistantMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  const missionAvailable =
+    chatMode === "team" &&
+    messages.length > 0 &&
+    (isStreaming || runActivities.length > 0 || Boolean(activeRunId));
+  const showMission = missionAvailable && teamView === "mission";
+  const canSend = Boolean(
+    composer.trim() &&
+      selectedModel &&
+      selectedModelInfo?.conversational &&
+      !isStreaming,
+  );
   const connectionLabel =
     connectionState === "checking"
       ? "Checking backend"
       : connectionState === "ready"
         ? `${models.length} local model${models.length === 1 ? "" : "s"}`
         : connectionState === "empty"
-          ? "No models installed"
+          ? models.length
+            ? "No chat-capable model"
+            : "No models installed"
           : "Backend offline";
   const composerPlaceholder = isStreaming
     ? "MASTER is responding…"
     : connectionState === "offline"
       ? "Project Master is offline — press Retry"
       : connectionState === "empty"
-        ? "Install an Ollama model to begin"
+        ? models.length
+          ? "Install or select a chat-capable Ollama model"
+          : "Install an Ollama model to begin"
         : "Message MASTER";
   const chatLayout = layoutController.layout.panels.chat_panel;
   const customizerLayout = layoutController.layout.panels.customize_panel;
@@ -497,7 +595,7 @@ function App() {
           />
           <span className="brand-copy">
             <span className="brand-name">MASTER</span>
-            <span className="brand-subtitle">LOCAL INTELLIGENCE · ALPHA v0.2.2</span>
+            <span className="brand-subtitle">LOCAL MULTI-AI COMMAND CENTER</span>
           </span>
         </div>
 
@@ -510,8 +608,69 @@ function App() {
             {connectionLabel}
           </span>
 
+          <div className="mode-control" aria-label="Chat mode">
+            <button
+              className={chatMode === "direct" ? "is-active" : undefined}
+              type="button"
+              aria-pressed={chatMode === "direct"}
+              onClick={() => setChatMode("direct")}
+              disabled={isStreaming || activeWorkspace !== "chat"}
+            >
+              Direct
+            </button>
+            <button
+              className={chatMode === "team" ? "is-active" : undefined}
+              type="button"
+              aria-pressed={chatMode === "team"}
+              title={
+                teamAvailable
+                  ? "Use the local model council and one authorized lead"
+                  : "The backend did not report a compatible team catalog"
+              }
+              onClick={() => setChatMode("team")}
+              disabled={!teamAvailable || isStreaming || activeWorkspace !== "chat"}
+            >
+              Team
+            </button>
+          </div>
+
+          <label
+            className={`mutation-control ${allowMutations ? "is-enabled" : ""}`}
+            title="This applies only to chat tool calls in the current conversation. Dashboard actions remain explicit."
+          >
+            <input
+              type="checkbox"
+              checked={allowMutations}
+              onChange={(event) =>
+                setAllowMutations(event.currentTarget.checked)
+              }
+              disabled={isStreaming || activeWorkspace !== "chat"}
+            />
+            <span>
+              {allowMutations ? "Allow project changes" : "Read only"}
+            </span>
+          </label>
+
+          <label className="model-control binder-control" htmlFor="binder-select">
+            <span>Binder</span>
+            <select
+              id="binder-select"
+              value={selectedProjectId}
+              onChange={(event) => setSelectedProjectId(event.currentTarget.value)}
+              disabled={connectionState !== "ready" || isStreaming}
+              title="Attach indexed Project Binder context to chat"
+            >
+              <option value="">No project context</option>
+              {binderProjects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <label className="model-control" htmlFor="model-select">
-            <span>Model</span>
+            <span>{chatMode === "team" ? "Lead" : "Model"}</span>
             <select
               id="model-select"
               value={selectedModel}
@@ -522,28 +681,56 @@ function App() {
                 <option value="">No models available</option>
               ) : (
                 models.map((model) => (
-                  <option key={model.name} value={model.name}>
-                    {model.name}
+                  <option
+                    key={model.name}
+                    value={model.name}
+                    disabled={!model.conversational}
+                  >
+                    {model.name} —{" "}
+                    {!model.conversational
+                      ? "not chat-compatible"
+                      : model.toolCapable
+                        ? "chat + tools"
+                        : model.capabilities.length
+                          ? "chat only"
+                          : "chat · capabilities unreported"}
                   </option>
                 ))
               )}
             </select>
+            {selectedModelInfo ? (
+              <small className="model-readiness">
+                {selectedModelInfo.toolCapable
+                  ? "Tool-capable"
+                  : "Completion-only; tool requests may not execute in Direct mode"}
+                {selectedModelInfo.capabilities.length
+                  ? ` · ${selectedModelInfo.capabilities.join(", ")}`
+                  : " · Ollama did not report capabilities"}
+              </small>
+            ) : null}
           </label>
 
           <button
             className="button button--secondary button--customize"
             type="button"
-            aria-expanded={customizerLayout.visible}
+            aria-expanded={
+              activeWorkspace === "chat" && customizerLayout.visible
+            }
             aria-controls="layout-customizer"
-            onClick={() =>
+            onClick={() => {
+              const nextVisible =
+                activeWorkspace === "chat"
+                  ? !customizerLayout.visible
+                  : true;
+              setActiveWorkspace("chat");
               layoutController.applyOperations([
                 {
                   operation: "set_visibility",
                   target: "customize_panel",
-                  value: !customizerLayout.visible,
+                  value: nextVisible,
                 },
-              ])
-            }
+              ]);
+            }}
           >
             Customize
           </button>
@@ -562,7 +749,17 @@ function App() {
 
       <UpdateNotice isBusy={isStreaming} />
 
-      <div className="workspace-shell" style={workspaceStyle}>
+      <WorkspaceNavigation
+        active={activeWorkspace}
+        disabled={isStreaming}
+        onChange={setActiveWorkspace}
+      />
+
+      {activeWorkspace === "chat" ? (
+      <div
+        className={`workspace-shell ${chatMode === "team" ? "workspace-shell--team" : ""}`}
+        style={workspaceStyle}
+      >
         <ConversationLibrary
           conversations={conversations}
           activeConversationId={conversationId}
@@ -578,6 +775,34 @@ function App() {
           ref={messageListRef}
           aria-label="Conversation"
         >
+        {chatMode === "team" ? (
+          <TeamStrip
+            available={teamAvailable}
+            catalog={teamCatalog}
+            runId={activeRunId}
+            isStreaming={isStreaming}
+          />
+        ) : null}
+        {missionAvailable ? (
+          <div className="mission-toggle" aria-label="Team run view">
+            <button
+              type="button"
+              className={teamView === "mission" ? "is-active" : undefined}
+              aria-pressed={teamView === "mission"}
+              onClick={() => setTeamView("mission")}
+            >
+              Mission
+            </button>
+            <button
+              type="button"
+              className={teamView === "transcript" ? "is-active" : undefined}
+              aria-pressed={teamView === "transcript"}
+              onClick={() => setTeamView("transcript")}
+            >
+              Transcript
+            </button>
+          </div>
+        ) : null}
         {connectionError ? (
           <div className="connection-notice" role="alert">
             <div>
@@ -597,9 +822,19 @@ function App() {
         {connectionState === "empty" ? (
           <div className="connection-notice" role="status">
             <div>
-              <strong>No Ollama models installed</strong>
+              <strong>
+                {models.length
+                  ? "No conversational Ollama model"
+                  : "No Ollama models installed"}
+              </strong>
               <p>
-                Run <code>ollama pull &lt;model-name&gt;</code>, then retry.
+                {models.length
+                  ? "Installed embedding or non-completion models cannot drive chat."
+                  : "Run "}
+                {!models.length ? (
+                  <code>ollama pull &lt;model-name&gt;</code>
+                ) : null}
+                {!models.length ? ", then retry." : " Install a chat model, then retry."}
               </p>
             </div>
             <button
@@ -630,6 +865,21 @@ function App() {
               <span>MM // CREATOR MARK</span>
             </div>
           </div>
+        ) : showMission ? (
+          <MissionView
+            goal={lastUserMessage?.content ?? ""}
+            runId={activeRunId}
+            activities={runActivities}
+            isStreaming={isStreaming}
+            answer={lastAssistantMessage?.content ?? ""}
+            answerStatus={lastAssistantMessage?.status ?? "complete"}
+            answerError={lastAssistantMessage?.error}
+            onRetry={
+              lastAssistantMessage
+                ? () => void retryMessage(lastAssistantMessage.id)
+                : undefined
+            }
+          />
         ) : (
           <div className="message-stack" role="log" aria-live="polite">
             {messages.map((message) => (
@@ -682,6 +932,18 @@ function App() {
         )}
         </section>
 
+        {chatMode === "team" || runActivities.length > 0 ? (
+          <RunRail
+            activities={runActivities}
+            runId={activeRunId}
+            isStreaming={isStreaming}
+            onClear={() => {
+              setRunActivities([]);
+              setActiveRunId(undefined);
+            }}
+          />
+        ) : null}
+
         {customizerLayout.visible ? (
           <div id="layout-customizer">
             <LayoutCustomizer
@@ -703,7 +965,17 @@ function App() {
           </div>
         ) : null}
       </div>
+      ) : (
+        <FeatureWorkspace
+          workspace={activeWorkspace}
+          onReturnToCommand={() => setActiveWorkspace("chat")}
+          selectedProjectId={selectedProjectId}
+          onSelectProject={setSelectedProjectId}
+          onProjectsChange={setBinderProjects}
+        />
+      )}
 
+      {activeWorkspace === "chat" ? (
       <footer className="composer-shell">
         <form className="composer" onSubmit={handleSubmit}>
           <textarea
@@ -725,11 +997,26 @@ function App() {
           </button>
         </form>
         <div className="composer-hint">
+          <span
+            className={`composer-safety ${allowMutations ? "is-enabled" : ""}`}
+            role="status"
+          >
+            CHAT TOOLS:{" "}
+            {allowMutations ? "PROJECT CHANGES ALLOWED" : "READ ONLY"}
+          </span>
+          <span>{chatMode === "team" ? "All compatible models · one tool lead" : "Single model"}</span>
+          <span>{selectedProjectId ? "Project Binder attached" : "No Binder context"}</span>
           <span>Enter to send</span>
           <span>Shift+Enter for a new line</span>
           <span>{contextLength.toLocaleString()} token context</span>
         </div>
       </footer>
+      ) : (
+        <footer className="workspace-footer">
+          <span>LOCAL-FIRST</span>
+          <span>Not configured means no external connection or simulated data.</span>
+        </footer>
+      )}
     </main>
   );
 }

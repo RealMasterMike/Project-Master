@@ -97,6 +97,7 @@ def test_explicit_memory_request_is_recorded_as_user_authorized(tmp_path: Path) 
     _answer, executions = agent.respond(
         session_id,
         "Please remember that I prefer concise answers.",
+        allow_mutations=True,
     )
 
     assert executions[0].ok

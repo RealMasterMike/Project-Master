@@ -1,33 +1,35 @@
-# Project Master v0.2.2
+# Project Master Python Engine v0.3.0 Beta RC
 
 [Master Mike on YouTube](https://www.youtube.com/@RealMasterMike?sub_confirmation=1) ·
 [Creator links](https://linktr.ee/realmastermike) ·
 [Support development](https://streamlabs.com/mastermike/tip)
 
-Project Master is a local-first AI framework designed around **epistemic reliability**: the assistant should represent reality as accurately as the available evidence allows, clearly separate facts from claims and inference, calibrate confidence, and revise conclusions when better evidence appears.
+Project Master is a local-first AI framework designed around **epistemic reliability**: represent
+reality as accurately as the available evidence allows, separate facts from claims and inference,
+calibrate confidence, and revise conclusions when better evidence appears.
 
-Version 0.2.2 is a runnable command-line MVP and packaged desktop engine built for Ollama. It includes:
+Version 0.3.0 is the packaged engine for the Linux daily-driver beta candidate. It includes:
 
-- an epistemic system prompt and project constitution;
-- an Ollama chat provider with tool-call support;
-- a persistent SQLite memory and conversation store;
-- an evidence ledger for claims and supporting or contradicting evidence;
-- adaptive communication-style profiling that mirrors style, not beliefs;
-- workspace-scoped file tools, a safe calculator, time, memory, and evidence tools;
-- a deterministic response auditor;
-- a Windows bootstrap script, tests, schemas, and architecture documentation.
-- a loopback-only local API for the Tauri client, including streaming responses.
-- a PyInstaller sidecar entry point used by the Tauri Windows installer.
+- Ollama Direct mode and a bounded sequential multi-model Team with capability-aware roles;
+- a persistent SQLite store for conversations, memory, evidence, projects, runs, and approvals;
+- Project Binder indexing and cited local retrieval-augmented generation (RAG) context;
+- an explicit per-chat mutation gate over workspace, terminal, memory, evidence, and integration
+  tools;
+- Dream recipes, resource-aware schedules, provenance snapshots, and a proposal-only inbox;
+- approved-revision ComfyUI workflows with typed inputs, owned jobs, and verified local artifacts;
+- Voice Studio contracts and local eSpeak NG and optional pinned Chatterbox adapters;
+- adaptive communication profiling, response auditing, cancellation, and streaming;
+- a Tauri-managed loopback API with a per-launch session token and a PyInstaller sidecar.
 
 ## Design principle
 
 > Do not ask only, “Can I answer this?” Ask, “What confidence does the available evidence justify?”
 
-## Quick start on Windows
+## Engine quick start
 
 ### 1. Prerequisites
 
-- Python 3.11 or newer
+- Python 3.11 through 3.14
 - Ollama running locally
 - At least one Ollama chat model installed
 
@@ -39,20 +41,25 @@ ollama pull qwen3:8b
 
 The model is configurable. Use any Ollama model that works well on your hardware; tool-calling support is recommended.
 
-### 2. Install
+### 2. Install on Linux
+
+```bash
+cd ProjectMaster-v0.1.0
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+cp .env.example .env
+```
+
+On Windows:
 
 ```powershell
 cd C:\Master\ProjectMaster-v0.1.0
-powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
-```
-
-Or install manually:
-
-```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
@@ -62,16 +69,15 @@ Open `.env` and set the model you already have installed:
 
 ```env
 MASTER_MODEL=qwen3:8b
-MASTER_NUM_CTX=32768
+MASTER_NUM_CTX=8192
 ```
 
-The default context is 32768. For an 8 GB GPU, `MASTER_NUM_CTX=8192` is the
-recommended starting point; larger contexts can force partial CPU offload or
-delay the first response depending on the model and runtime.
+The default context is 8192. Increase it only after confirming the selected model responds
+reliably on the available RAM and VRAM.
 
 ### 4. Verify and run
 
-```powershell
+```text
 master doctor
 master chat
 ```
@@ -92,7 +98,7 @@ Inside chat:
 
 ## Useful commands
 
-```powershell
+```text
 master doctor
 master chat
 master ask "Evaluate this claim and explain your confidence."
@@ -111,22 +117,32 @@ prompts/             Human-readable prompt drafts
 schemas/             JSON schemas for claims, memory, tasks, and responses
 src/project_master/  Runnable Python package
 tests/               Unit tests
-scripts/             Windows bootstrap and run scripts
+scripts/             Windows-only standalone engine helpers (desktop packaging is at repository root)
 ```
 
 ## Safety and autonomy model
 
 Project Master is designed to be capable without silently taking broad control of the machine.
 
-- File operations are restricted to `MASTER_WORKSPACE_ROOT`.
-- File writes are disabled by default.
-- No unrestricted shell tool is included in v0.1.
+- Workspace file operations are restricted to `MASTER_WORKSPACE_ROOT` or the selected project's
+  local root.
+- Mutating tools are omitted from model schemas and rejected by execution unless the current API
+  chat request explicitly sets `allow_mutations`.
+- Workspace writes also require `MASTER_ALLOW_FILE_WRITES=true`.
+- The Linux terminal accepts argument arrays rather than shell strings, enforces resource and output
+  bounds, and keeps network access separately disabled by default. It is project-bound when
+  Bubblewrap is available; without Bubblewrap it exposes only a read-only command allowlist, whose
+  command arguments can still reference host-readable paths.
 - Tool results are returned to the model as evidence, not automatically treated as truth.
 - Memory stores user-supplied information separately from verified evidence.
 - Ordinary conversation remains in the session history. Durable memory writes require an explicit
-  user request to remember, save, or store the information and are labeled as user-authorized.
+  mutation-enabled request and remain labeled by source.
+- Dream results remain proposals, ComfyUI workflow revisions require approval, and reference voice
+  profiles require a rights attestation. Generated audio references use a distinct
+  `synthetic_reference` basis; a reference WAV is not accepted as consent or license evidence.
 
-Enable workspace writes deliberately:
+The desktop exposes the request-scoped mutation switch as **Allow project changes**. The environment
+setting alone does not grant a chat permission.
 
 ```env
 MASTER_ALLOW_FILE_WRITES=true
@@ -134,12 +150,20 @@ MASTER_ALLOW_FILE_WRITES=true
 
 ## Current limitations
 
-- Adaptive personality is lightweight and based on communication signals, not deep psychological inference.
-- Web research is not bundled because search providers require different credentials and terms. The tool registry is ready for a search plugin in a later phase.
-- The response auditor is a heuristic linter, not a second independent model.
-- Local-model tool calling varies by model quality.
-- The installed Tauri alpha client starts and stops the packaged API automatically. Developers can
-  still run `master serve` independently.
+- Ollama and at least one conversational local model remain required for chat and Dream runs.
+- Team execution is sequential and bounded; it does not claim simultaneous autonomous agents or
+  independent models when only one physical model is installed.
+- Local-model tool calling varies by model quality. A tool-capable lead is preferred but cannot be
+  manufactured from a model that lacks tool support.
+- ComfyUI and Chatterbox are optional, separately installed integrations. They are not silently
+  downloaded by the normal application startup path.
+- Project Binder retrieval is lexical SQLite FTS/LIKE search, not an embedding or vector database.
+- Adaptive personality remains communication-style adaptation, not psychological inference.
+- The response auditor is a deterministic linter, not a second independent verifier model.
+- The Tauri beta candidate starts and stops the packaged API automatically. Developers can still run
+  `master serve` independently. Standalone `master serve` is unauthenticated unless
+  `MASTER_SESSION_TOKEN` is set and accepts an explicit bind host, so do not expose it to an
+  untrusted network.
 
 ## Development direction
 

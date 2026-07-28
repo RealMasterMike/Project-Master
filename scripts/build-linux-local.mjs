@@ -1,0 +1,443 @@
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import {
+  isMain,
+  prependCargoBin,
+  repoRoot,
+  resolveRustc,
+  run,
+} from "./lib/platform.mjs";
+
+export const APPIMAGE_PRODUCT_NAME = "master";
+export const APPIMAGE_DESKTOP_FILE = "master.desktop";
+export const APPIMAGE_ICON_FILE = "master.png";
+export const BRANDED_APPIMAGE_PREFIX = "Project-Master";
+export const BUNDLE_MARKERS = {
+  pristine: "__TAURI_BUNDLE_TYPE_VAR_UNK",
+  rpm: "__TAURI_BUNDLE_TYPE_VAR_RPM",
+  appImage: "__TAURI_BUNDLE_TYPE_VAR_APP",
+};
+const KNOWN_APPIMAGE_OUTPUT =
+  /^(?:master|Project_Master|Project-Master)[A-Za-z0-9._+-]*\.AppImage$/;
+
+export function linuxArtifactArchitecture(architecture = os.arch()) {
+  const supported = {
+    x64: "x86_64",
+    arm64: "aarch64",
+    arm: "armhf",
+  };
+  const artifactArchitecture = supported[architecture];
+  if (!artifactArchitecture) {
+    throw new Error(
+      `Unsupported Linux artifact architecture: ${architecture}.`,
+    );
+  }
+  return artifactArchitecture;
+}
+
+export function brandedAppImageName(version, architecture = os.arch()) {
+  if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) {
+    throw new Error(`Unsafe AppImage version: ${JSON.stringify(version)}.`);
+  }
+  return `${BRANDED_APPIMAGE_PREFIX}-${version}-${linuxArtifactArchitecture(architecture)}.AppImage`;
+}
+
+function desktopFields(document) {
+  const fields = new Map();
+  for (const rawLine of document.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith("[")) continue;
+    const separator = line.indexOf("=");
+    if (separator <= 0) continue;
+    fields.set(line.slice(0, separator), line.slice(separator + 1));
+  }
+  return fields;
+}
+
+async function requireNonEmptyFile(filePath, label) {
+  const fileStats = await stat(filePath).catch(() => null);
+  if (!fileStats?.isFile() || fileStats.size === 0) {
+    throw new Error(`${label} is missing or empty: ${filePath}`);
+  }
+  return fileStats;
+}
+
+export async function verifyBundleMarker(
+  filePath,
+  expectedMarker,
+  label = "Tauri executable",
+) {
+  const content = await readFile(filePath);
+  if (!content.includes(Buffer.from(expectedMarker))) {
+    throw new Error(
+      `${label} does not contain the expected ${expectedMarker} bundle marker.`,
+    );
+  }
+}
+
+export async function verifyStagedAppDir(appDir) {
+  const appDirStats = await stat(appDir).catch(() => null);
+  if (!appDirStats?.isDirectory()) {
+    throw new Error(`Tauri did not stage the expected AppDir: ${appDir}`);
+  }
+
+  const desktopPath = path.join(appDir, APPIMAGE_DESKTOP_FILE);
+  const desktopStats = await lstat(desktopPath).catch(() => null);
+  if (!desktopStats || (!desktopStats.isFile() && !desktopStats.isSymbolicLink())) {
+    throw new Error(`AppImage desktop entry is missing: ${desktopPath}`);
+  }
+  const fields = desktopFields(await readFile(desktopPath, "utf8"));
+  const expectedFields = {
+    Name: "Project Master",
+    Exec: APPIMAGE_PRODUCT_NAME,
+    Icon: APPIMAGE_PRODUCT_NAME,
+    Type: "Application",
+    Terminal: "false",
+  };
+  for (const [name, expected] of Object.entries(expectedFields)) {
+    if (fields.get(name) !== expected) {
+      throw new Error(
+        `AppImage desktop field ${name} must be ${JSON.stringify(expected)}; received ${JSON.stringify(fields.get(name))}.`,
+      );
+    }
+  }
+
+  await Promise.all([
+    requireNonEmptyFile(
+      path.join(appDir, APPIMAGE_ICON_FILE),
+      "AppImage root icon",
+    ),
+    requireNonEmptyFile(
+      path.join(appDir, "usr", "bin", APPIMAGE_PRODUCT_NAME),
+      "AppImage desktop executable",
+    ),
+    requireNonEmptyFile(
+      path.join(appDir, "usr", "bin", "project-master-backend"),
+      "AppImage backend sidecar",
+    ),
+    requireNonEmptyFile(path.join(appDir, "AppRun"), "AppImage launcher"),
+    requireNonEmptyFile(
+      path.join(appDir, "usr", "lib", "libwebkit2gtk-4.1.so.0"),
+      "AppImage WebKit runtime",
+    ),
+    requireNonEmptyFile(
+      path.join(
+        appDir,
+        "usr",
+        "libexec",
+        "webkit2gtk-4.1",
+        "WebKitWebProcess",
+      ),
+      "AppImage WebKit subprocess",
+    ),
+    requireNonEmptyFile(
+      path.join(appDir, "usr", "lib", "libgstreamer-1.0.so.0"),
+      "AppImage media runtime",
+    ),
+    verifyBundleMarker(
+      path.join(appDir, "usr", "bin", APPIMAGE_PRODUCT_NAME),
+      BUNDLE_MARKERS.appImage,
+      "Staged AppImage executable",
+    ),
+  ]);
+}
+
+export async function finalizeLinuxAppImage({
+  bundleRoot,
+  version,
+  architecture = os.arch(),
+}) {
+  const appDir = path.join(
+    bundleRoot,
+    `${APPIMAGE_PRODUCT_NAME}.AppDir`,
+  );
+  await verifyStagedAppDir(appDir);
+
+  const entries = await readdir(bundleRoot, { withFileTypes: true });
+  const images = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".AppImage"))
+    .map((entry) => entry.name);
+  const destination = path.join(
+    bundleRoot,
+    brandedAppImageName(version, architecture),
+  );
+  const generated = images.filter(
+    (name) => path.join(bundleRoot, name) !== destination,
+  );
+  const unknown = generated.filter(
+    (name) => !KNOWN_APPIMAGE_OUTPUT.test(name),
+  );
+  if (unknown.length) {
+    throw new Error(
+      `Refusing to replace unexpected AppImage output: ${unknown.join(", ")}.`,
+    );
+  }
+  if (generated.length > 1 || (generated.length === 0 && !images.length)) {
+    throw new Error(
+      `Expected one generated AppImage or one existing branded final in ${bundleRoot}; found ${images.length}.`,
+    );
+  }
+  const source =
+    generated.length === 1
+      ? path.join(bundleRoot, generated[0])
+      : destination;
+  await requireNonEmptyFile(source, "Generated AppImage");
+  if (source !== destination) {
+    await rm(destination, { force: true });
+    await rename(source, destination);
+  }
+  await chmod(destination, 0o755);
+  await requireNonEmptyFile(destination, "Branded AppImage");
+  return destination;
+}
+
+export function tauriCacheDirectory(
+  env = process.env,
+  homeDirectory = os.homedir(),
+) {
+  if (env.PROJECT_MASTER_TAURI_CACHE_DIR) {
+    return path.resolve(env.PROJECT_MASTER_TAURI_CACHE_DIR);
+  }
+  const cacheHome = env.XDG_CACHE_HOME
+    ? path.resolve(env.XDG_CACHE_HOME)
+    : path.join(homeDirectory, ".cache");
+  return path.join(cacheHome, "tauri");
+}
+
+export function appImageOutputPluginPath(
+  env = process.env,
+  homeDirectory = os.homedir(),
+) {
+  return path.join(
+    tauriCacheDirectory(env, homeDirectory),
+    "linuxdeploy-plugin-appimage.AppImage",
+  );
+}
+
+export function localLinuxBuildCommands(root = repoRoot) {
+  const tauriCli = path.join(
+    root,
+    "node_modules",
+    "@tauri-apps",
+    "cli",
+    "tauri.js",
+  );
+  return {
+    clean: {
+      command: "cargo",
+      args: [
+        "clean",
+        "--release",
+        "--package",
+        "master",
+        "--manifest-path",
+        path.join(root, "src-tauri", "Cargo.toml"),
+      ],
+    },
+    build: {
+      command: process.execPath,
+      args: [
+        path.join(root, "scripts", "run-tauri.mjs"),
+        "build",
+        "--no-bundle",
+        "--config",
+        "scripts/tauri.local.conf.json",
+      ],
+    },
+    rpm: {
+      command: process.execPath,
+      args: [
+        tauriCli,
+        "bundle",
+        "--bundles",
+        "rpm",
+        "--config",
+        "scripts/tauri.local.conf.json",
+      ],
+    },
+    appImage: {
+      command: process.execPath,
+      args: [
+        tauriCli,
+        "bundle",
+        "--bundles",
+        "appimage",
+        "--config",
+        "scripts/tauri.appimage.conf.json",
+      ],
+    },
+    verify: {
+      command: process.execPath,
+      args: [
+        path.join(root, "scripts", "verify-packaging.mjs"),
+        "--sidecar",
+        "--artifacts",
+      ],
+    },
+  };
+}
+
+async function removeKnownAppImageOutputs(bundleRoot) {
+  const entries = await readdir(bundleRoot, { withFileTypes: true }).catch(
+    () => [],
+  );
+  await Promise.all(
+    entries
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          entry.name.endsWith(".AppImage") &&
+          KNOWN_APPIMAGE_OUTPUT.test(entry.name),
+      )
+      .map((entry) => rm(path.join(bundleRoot, entry.name), { force: true })),
+  );
+}
+
+export async function buildLocalLinux() {
+  if (process.platform !== "linux") {
+    throw new Error("The local Linux package build must run on Linux.");
+  }
+  const packageDocument = JSON.parse(
+    await readFile(path.join(repoRoot, "package.json"), "utf8"),
+  );
+  const version = packageDocument.version;
+  const appImageBundleRoot = path.join(
+    repoRoot,
+    "src-tauri",
+    "target",
+    "release",
+    "bundle",
+    "appimage",
+  );
+  const commands = localLinuxBuildCommands();
+  const env = prependCargoBin();
+  resolveRustc(env);
+  const releaseBinary = path.join(
+    repoRoot,
+    "src-tauri",
+    "target",
+    "release",
+    APPIMAGE_PRODUCT_NAME,
+  );
+  const pristineRoot = path.join(
+    repoRoot,
+    "src-tauri",
+    "target",
+    "release",
+    "project-master-package-staging",
+  );
+  const pristineBinary = path.join(pristineRoot, APPIMAGE_PRODUCT_NAME);
+
+  // Bundle marker patching mutates Cargo's release artifact. Clean only the
+  // application package so one subsequent build relinks a pristine marker
+  // without recompiling the dependency graph.
+  await run(commands.clean.command, commands.clean.args, { env });
+
+  // run-tauri owns the only sidecar, frontend, and Rust compilation.
+  await run(commands.build.command, commands.build.args, { env });
+  await verifyBundleMarker(
+    releaseBinary,
+    BUNDLE_MARKERS.pristine,
+    "Fresh no-bundle executable",
+  );
+  await rm(pristineRoot, { recursive: true, force: true });
+  await mkdir(pristineRoot, { recursive: true });
+  await copyFile(releaseBinary, pristineBinary);
+  const pristineMode = (await stat(releaseBinary)).mode & 0o777;
+
+  try {
+    // Tauri patches a bundle-specific copy and restores the release binary
+    // after a successful bundle. Keep our pristine copy as a failure-safe.
+    await run(commands.rpm.command, commands.rpm.args, { env });
+    await verifyBundleMarker(
+      releaseBinary,
+      BUNDLE_MARKERS.pristine,
+      "Post-RPM release executable",
+    );
+
+    // AppImage bundling reuses the same compiled binary. Fedora 44 emits RELR
+    // sections that the old linuxdeploy strip bundled by Tauri cannot parse.
+    await mkdir(appImageBundleRoot, { recursive: true });
+    await rm(
+      path.join(appImageBundleRoot, `${APPIMAGE_PRODUCT_NAME}.AppDir`),
+      { recursive: true, force: true },
+    );
+    await removeKnownAppImageOutputs(appImageBundleRoot);
+    let tauriBundleError;
+    try {
+      await run(commands.appImage.command, commands.appImage.args, {
+        env: { ...env, NO_STRIP: "1" },
+      });
+    } catch (error) {
+      tauriBundleError = error;
+    }
+    const stagedAppDir = path.join(
+      appImageBundleRoot,
+      `${APPIMAGE_PRODUCT_NAME}.AppDir`,
+    );
+    if (tauriBundleError) {
+      // A known RELR-only linuxdeploy exit can occur after Tauri has fully
+      // staged and marked the AppDir. Validate that state before bypassing only
+      // the obsolete deploy/strip phase and invoking Tauri's output plugin.
+      try {
+        await verifyStagedAppDir(stagedAppDir);
+      } catch (stagingError) {
+        throw new AggregateError(
+          [tauriBundleError, stagingError],
+          "Tauri AppImage bundling failed before a valid AppDir was staged.",
+        );
+      }
+      await removeKnownAppImageOutputs(appImageBundleRoot);
+      const outputPlugin = appImageOutputPluginPath(env);
+      await requireNonEmptyFile(
+        outputPlugin,
+        "Tauri cached AppImage output plugin",
+      );
+      await chmod(outputPlugin, 0o755);
+      await run(
+        outputPlugin,
+        ["--appimage-extract-and-run", "--appdir", stagedAppDir],
+        {
+          cwd: appImageBundleRoot,
+          env: {
+            ...env,
+            ARCH: linuxArtifactArchitecture(),
+          },
+        },
+      );
+    }
+    const appImage = await finalizeLinuxAppImage({
+      bundleRoot: appImageBundleRoot,
+      version,
+    });
+    console.log(`Finalized ${path.relative(repoRoot, appImage)}.`);
+
+    await run(commands.verify.command, commands.verify.args, { env });
+    return appImage;
+  } finally {
+    // A failed bundler may leave its marker in Cargo's output. Always restore
+    // the pristine executable so a retry starts from a known state.
+    await copyFile(pristineBinary, releaseBinary);
+    await chmod(releaseBinary, pristineMode);
+    await rm(pristineRoot, { recursive: true, force: true });
+  }
+}
+
+if (isMain(import.meta.url)) {
+  buildLocalLinux().catch((error) => {
+    console.error(`Local Linux build failed: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

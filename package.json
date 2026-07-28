@@ -1,18 +1,26 @@
 {
   "name": "project-master-desktop",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.3.0",
+  "description": "Local-first multi-AI desktop command center",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
     "preview": "vite preview",
-    "backend:sidecar": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build-backend-sidecar.ps1",
-    "backend:sidecar:test": "powershell -ExecutionPolicy Bypass -File .\\scripts\\test-backend-sidecar.ps1",
-    "tauri": "tauri",
-    "tauri:dev": "npm run backend:sidecar && tauri dev",
-    "tauri:build": "npm run backend:sidecar && tauri build"
+    "backend:sidecar": "node scripts/build-backend-sidecar.mjs",
+    "backend:sidecar:test": "node scripts/test-backend-sidecar.mjs",
+    "acceptance:linux": "node scripts/test-linux-acceptance.mjs",
+    "packaging:check": "node scripts/verify-packaging.mjs --preflight",
+    "packaging:test": "node --test scripts/tests/packaging.node.mjs",
+    "packaging:verify": "node scripts/verify-packaging.mjs --sidecar --artifacts",
+    "tauri": "node scripts/run-tauri.mjs",
+    "tauri:dev": "node scripts/run-tauri.mjs dev",
+    "tauri:build": "node scripts/run-tauri.mjs build",
+    "tauri:build:linux": "node scripts/run-tauri.mjs build --bundles rpm,appimage",
+    "tauri:build:linux:local": "node scripts/build-linux-local.mjs",
+    "tauri:build:windows": "node scripts/run-tauri.mjs build --bundles nsis,msi"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

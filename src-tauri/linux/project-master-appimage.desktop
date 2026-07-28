@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=Office;
+Comment=Local-first multi-AI command center
+Exec=master
+StartupWMClass=master
+Icon=master
+Name=Project Master
+Terminal=false
+Type=Application
