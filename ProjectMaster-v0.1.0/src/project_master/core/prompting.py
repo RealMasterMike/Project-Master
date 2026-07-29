@@ -19,7 +19,13 @@ class PromptBuilder:
         memory_context: str = "",
         interpretation_context: str = "",
     ) -> str:
-        sections = [self.base_prompt.strip(), profile.prompt_summary()]
+        # The adaptive communication profile is deliberately NOT injected. It rewrote the
+        # model's own instructions from observed user style (directness, humor, profanity
+        # tolerance, and up to 16 learned preferences), which made behavior drift in ways
+        # the user could not see or control. StyleProfiler still records observations, so
+        # re-enabling this is a one-line change: append profile.prompt_summary() here.
+        del profile
+        sections = [self.base_prompt.strip()]
         if memory_context.strip():
             sections.append(
                 "Relevant stored context follows. Treat it as context with provenance, "

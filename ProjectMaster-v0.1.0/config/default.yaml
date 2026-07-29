@@ -1,7 +1,7 @@
-model: qwen3:8b
+model: hf.co/TrevorJS/gemma-4-E4B-it-uncensored-GGUF:Q4_K_M
 ollama_url: http://127.0.0.1:11434
 temperature: 0.3
-num_ctx: 8192
+num_ctx: 65536
 max_response_tokens: 2048
 team_role_max_tokens: 768
 max_prompt_chars: 24000

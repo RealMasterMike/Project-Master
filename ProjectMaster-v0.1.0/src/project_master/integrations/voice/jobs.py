@@ -9,7 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from project_master.integrations.voice.cache import VoiceChunkPlan
 from project_master.integrations.voice.profiles import RenderPurpose
-from project_master.integrations.voice.projects import RenderSettings
+from project_master.integrations.voice.projects import (
+    RenderSettings,
+    VoiceWorkflowOrigin,
+)
+
+VOICE_RENDER_OWNER_PREFIX = "voice-job-"
 
 
 class RenderJobStatus(StrEnum):
@@ -220,6 +225,7 @@ class RenderJob(BaseModel):
     purpose: RenderPurpose
     settings: RenderSettings
     chunks: tuple[RenderChunkState, ...]
+    origin: VoiceWorkflowOrigin = VoiceWorkflowOrigin.VOICE_STUDIO
     status: RenderJobStatus = RenderJobStatus.PLANNED
     resource_lease_id: str | None = None
     created_at: datetime
@@ -241,6 +247,7 @@ class RenderJob(BaseModel):
         purpose: RenderPurpose,
         settings: RenderSettings,
         plans: tuple[VoiceChunkPlan, ...],
+        origin: VoiceWorkflowOrigin = VoiceWorkflowOrigin.VOICE_STUDIO,
         now: datetime | None = None,
     ) -> RenderJob:
         timestamp = now or datetime.now(UTC)
@@ -253,9 +260,22 @@ class RenderJob(BaseModel):
             purpose=purpose,
             settings=settings,
             chunks=tuple(RenderChunkState(plan=plan) for plan in plans),
+            origin=origin,
             created_at=timestamp,
             updated_at=timestamp,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_chat_speech_origin(cls, value: Any) -> Any:
+        """Classify chat-speech jobs persisted before origin metadata existed."""
+        if (
+            isinstance(value, dict)
+            and "origin" not in value
+            and str(value.get("project_id", "")).startswith("chat-speech-")
+        ):
+            return {**value, "origin": VoiceWorkflowOrigin.CHAT_SPEECH}
+        return value
 
     @field_validator("created_at", "updated_at", "started_at", "finished_at")
     @classmethod
@@ -289,6 +309,10 @@ class RenderJob(BaseModel):
             for chunk in self.chunks
             if chunk.artifact_id is not None and chunk.status.complete
         )
+
+    @property
+    def studio_visible(self) -> bool:
+        return self.origin.studio_visible
 
     def transition(
         self,

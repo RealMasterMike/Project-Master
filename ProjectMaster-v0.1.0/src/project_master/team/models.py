@@ -48,6 +48,8 @@ class CatalogModel:
     details: ModelDetails = field(default_factory=ModelDetails)
     modified_at: str | None = None
     inspection_error: str | None = None
+    automatic_eligible: bool = False
+    curated_purposes: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         if not self.tags:
@@ -83,6 +85,14 @@ class CatalogModel:
         expected = capability.casefold()
         return any(item.casefold() == expected for item in self.capabilities)
 
+    def is_automatic_for(self, purpose: str) -> bool:
+        expected = purpose.strip().casefold()
+        return (
+            self.automatic_eligible
+            and bool(expected)
+            and any(item.casefold() == expected for item in self.curated_purposes)
+        )
+
     def tag_for(self, preferred: str | None = None) -> str:
         if preferred:
             expected = preferred.casefold()
@@ -102,6 +112,8 @@ class CatalogModel:
             "details": self.details.to_dict(),
             "modified_at": self.modified_at,
             "inspection_error": self.inspection_error,
+            "automatic_eligible": self.automatic_eligible,
+            "curated_purposes": sorted(self.curated_purposes),
         }
 
 
@@ -234,6 +246,8 @@ class CouncilResult:
 
 class ActivityKind(StrEnum):
     COUNCIL_STARTED = "council_started"
+    TRIAGE_STARTED = "triage_started"
+    TRIAGE_COMPLETED = "triage_completed"
     MODEL_SKIPPED = "model_skipped"
     WORKER_STARTED = "worker_started"
     WORKER_COMPLETED = "worker_completed"
@@ -299,6 +313,10 @@ class CouncilRequest:
     prompt: str
     context: str = ""
     run_id: str | None = None
+    automatic_purpose: str = "team"
+    # When True the lead model first selects which specialist roles the message
+    # actually needs; deliberate all-eligible-model runs (e.g. Dreams) disable it.
+    triage: bool = True
 
     def bounded(self, limits: CouncilLimits) -> tuple[str, str, bool]:
         prompt, prompt_truncated = _bounded_text(self.prompt.strip(), limits.max_request_chars)

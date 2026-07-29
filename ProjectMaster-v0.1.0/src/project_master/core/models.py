@@ -12,9 +12,13 @@ class Message:
     content: str
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_name: str | None = None
+    finish_reason: str | None = None
+    images: tuple[str, ...] = ()
 
     def to_ollama(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"role": self.role, "content": self.content}
+        if self.images:
+            payload["images"] = list(self.images)
         if self.tool_calls:
             payload["tool_calls"] = self.tool_calls
         if self.tool_name:

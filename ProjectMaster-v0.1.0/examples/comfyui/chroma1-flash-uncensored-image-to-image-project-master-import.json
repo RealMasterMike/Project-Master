@@ -1,0 +1,311 @@
+{
+  "bindings": [
+    {
+      "choices": [],
+      "default_value": null,
+      "description": "Verified image from this project's Media library.",
+      "id": "source_image",
+      "input_name": "image",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "16",
+      "required": true,
+      "value_type": "image_asset"
+    },
+    {
+      "choices": [],
+      "default_value": "Restyle the source while preserving its recognizable subject and composition.",
+      "description": "Describe the image to create.",
+      "id": "prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "6",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": "low quality, blurry, distorted, deformed, watermark, text",
+      "description": "Visual qualities to discourage. Requires guidance above 1.0 to have any effect.",
+      "id": "negative_prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "7",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": 0,
+      "description": "Deterministic generation seed.",
+      "id": "seed",
+      "input_name": "noise_seed",
+      "maximum": 2147483647,
+      "minimum": 0,
+      "node_id": "11",
+      "required": false,
+      "value_type": "integer"
+    },
+    {
+      "choices": [
+        512,
+        768,
+        1024
+      ],
+      "default_value": 1024,
+      "description": "Output width in pixels. 1024 is validated on an 8 GB GPU.",
+      "id": "width",
+      "input_name": "width",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "12",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        512,
+        768,
+        1024
+      ],
+      "default_value": 1024,
+      "description": "Output height in pixels. 1024 is validated on an 8 GB GPU.",
+      "id": "height",
+      "input_name": "height",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "12",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [],
+      "default_value": 0.55,
+      "description": "How far to move from the source image. Higher values follow the prompt more and the source less.",
+      "id": "strength",
+      "input_name": "denoise",
+      "maximum": 1,
+      "minimum": 0,
+      "node_id": "10",
+      "required": false,
+      "value_type": "number"
+    },
+    {
+      "choices": [
+        8,
+        10,
+        12,
+        16
+      ],
+      "default_value": 12,
+      "description": "Sampling steps. This distilled model is tuned for about 10.",
+      "id": "steps",
+      "input_name": "steps",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "10",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [],
+      "default_value": 2.5,
+      "description": "Prompt guidance strength. 1.0 disables the negative prompt and roughly halves generation time.",
+      "id": "guidance",
+      "input_name": "cfg",
+      "maximum": 6,
+      "minimum": 1,
+      "node_id": "8",
+      "required": false,
+      "value_type": "number"
+    }
+  ],
+  "name": "Chroma1-Flash Uncensored — Image to Image",
+  "purpose": "image",
+  "workflow": {
+    "1": {
+      "class_type": "UnetLoaderGGUF",
+      "inputs": {
+        "unet_name": "Chroma1-HD-Flash-Q4_K_M.gguf"
+      }
+    },
+    "2": {
+      "class_type": "CLIPLoaderGGUF",
+      "inputs": {
+        "clip_name": "t5-v1_1-xxl-encoder-Q5_K_M.gguf",
+        "type": "chroma"
+      }
+    },
+    "3": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "flux-ae.safetensors"
+      }
+    },
+    "4": {
+      "class_type": "T5TokenizerOptions",
+      "inputs": {
+        "clip": [
+          "2",
+          0
+        ],
+        "min_length": 0,
+        "min_padding": 0
+      }
+    },
+    "5": {
+      "class_type": "ModelSamplingAuraFlow",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ],
+        "shift": 1.0
+      }
+    },
+    "6": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "4",
+          0
+        ],
+        "text": "Restyle the source while preserving its recognizable subject and composition."
+      }
+    },
+    "7": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "4",
+          0
+        ],
+        "text": "low quality, blurry, distorted, deformed, watermark, text"
+      }
+    },
+    "8": {
+      "class_type": "CFGGuider",
+      "inputs": {
+        "cfg": 2.5,
+        "model": [
+          "5",
+          0
+        ],
+        "negative": [
+          "7",
+          0
+        ],
+        "positive": [
+          "6",
+          0
+        ]
+      }
+    },
+    "9": {
+      "class_type": "KSamplerSelect",
+      "inputs": {
+        "sampler_name": "euler"
+      }
+    },
+    "10": {
+      "class_type": "BasicScheduler",
+      "inputs": {
+        "denoise": 0.55,
+        "model": [
+          "5",
+          0
+        ],
+        "scheduler": "beta",
+        "steps": 12
+      }
+    },
+    "11": {
+      "class_type": "RandomNoise",
+      "inputs": {
+        "noise_seed": 0
+      }
+    },
+    "12": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "crop": "center",
+        "height": 1024,
+        "image": [
+          "16",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 1024
+      }
+    },
+    "13": {
+      "class_type": "SamplerCustomAdvanced",
+      "inputs": {
+        "guider": [
+          "8",
+          0
+        ],
+        "latent_image": [
+          "17",
+          0
+        ],
+        "noise": [
+          "11",
+          0
+        ],
+        "sampler": [
+          "9",
+          0
+        ],
+        "sigmas": [
+          "10",
+          0
+        ]
+      }
+    },
+    "14": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "13",
+          0
+        ],
+        "vae": [
+          "3",
+          0
+        ]
+      }
+    },
+    "15": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "ProjectMaster/chroma1-flash-i2i",
+        "images": [
+          "14",
+          0
+        ]
+      }
+    },
+    "16": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "example.png"
+      }
+    },
+    "17": {
+      "class_type": "VAEEncode",
+      "inputs": {
+        "pixels": [
+          "12",
+          0
+        ],
+        "vae": [
+          "3",
+          0
+        ]
+      }
+    }
+  }
+}

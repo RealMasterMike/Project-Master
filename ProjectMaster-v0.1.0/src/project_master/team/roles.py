@@ -26,6 +26,8 @@ class CapabilityAwareRoleAssigner:
         self,
         models: Sequence[CatalogModel],
         preferred_lead: str | None = None,
+        *,
+        required_purpose: str = "team",
     ) -> TeamPlan:
         eligible: list[CatalogModel] = []
         excluded: list[ExcludedModel] = []
@@ -37,6 +39,17 @@ class CapabilityAwareRoleAssigner:
                 )
                 continue
             seen_physical_ids.add(model.physical_id)
+            if not model.is_automatic_for(required_purpose):
+                excluded.append(
+                    ExcludedModel(
+                        model=model,
+                        reason=(
+                            "model is not curated for automatic "
+                            f"{required_purpose.strip().casefold() or 'team'} use"
+                        ),
+                    )
+                )
+                continue
             if not model.supports_completion:
                 excluded.append(
                     ExcludedModel(
@@ -114,3 +127,49 @@ class CapabilityAwareRoleAssigner:
             capabilities=model.capabilities,
             size_bytes=model.size_bytes,
         )
+
+
+def recommend_conversational_model(
+    models: Sequence[CatalogModel],
+    configured_model: str | None,
+    *,
+    role_assigner: CapabilityAwareRoleAssigner | None = None,
+    required_purpose: str = "chat",
+    required_capabilities: frozenset[str] = frozenset(),
+) -> str | None:
+    """Return an installed conversational tag suitable for a new chat selection.
+
+    An installed configured tag remains the recommendation even when another model would make a
+    stronger council lead. When the configured tag is absent or non-conversational, reuse the
+    capability-aware lead policy so the fallback is deterministic and capability based rather
+    than whichever tag Ollama happened to list first.
+    """
+
+    expected_capabilities = {
+        capability.strip().casefold()
+        for capability in required_capabilities
+        if capability.strip()
+    }
+
+    def eligible(model: CatalogModel) -> bool:
+        return (
+            model.is_automatic_for(required_purpose)
+            and model.supports_completion
+            and all(model.has_capability(item) for item in expected_capabilities)
+        )
+
+    eligible_models = [model for model in models if eligible(model)]
+    configured = (configured_model or "").strip()
+    if configured:
+        expected = configured.casefold()
+        for model in eligible_models:
+            if any(
+                tag.casefold() == expected for tag in model.tags
+            ):
+                return model.tag_for(configured)
+
+    plan = (role_assigner or CapabilityAwareRoleAssigner()).assign(
+        eligible_models,
+        required_purpose=required_purpose,
+    )
+    return plan.lead.model_tag if plan.lead is not None else None

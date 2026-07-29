@@ -5,6 +5,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, Protocol
 
+from project_master.llm.curated import curated_model_purposes
 from project_master.team.models import CatalogModel, ModelDetails, _bounded_text
 
 
@@ -89,6 +90,7 @@ class OllamaModelCatalog:
             )
             capabilities = _capabilities(show, aliases)
             details = _details(show, aliases)
+            curated_purposes = curated_model_purposes(tags, digest)
             catalog.append(
                 CatalogModel(
                     physical_id=physical_id,
@@ -99,6 +101,10 @@ class OllamaModelCatalog:
                     details=details,
                     modified_at=modified_at or None,
                     inspection_error=inspection_error,
+                    automatic_eligible=bool(
+                        curated_purposes.intersection({"chat", "team", "dream"})
+                    ),
+                    curated_purposes=curated_purposes,
                 )
             )
         return tuple(sorted(catalog, key=lambda item: item.primary_tag.casefold()))

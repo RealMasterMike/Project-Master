@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import {
   access,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -20,7 +22,11 @@ import {
   sidecarPathForTarget,
   validateTargetTriple,
 } from "./lib/platform.mjs";
-import { brandedAppImageName } from "./build-linux-local.mjs";
+import {
+  brandedAppImageName,
+  linuxElfClass,
+  readElfClass,
+} from "./build-linux-local.mjs";
 
 function sectionVersion(document, section) {
   const escaped = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -72,6 +78,78 @@ async function collectFiles(directory, predicate) {
     }
   }
   return found;
+}
+
+export async function verifyExtractedGstreamerPluginArchitecture(
+  extractedRoot,
+  architecture = os.arch(),
+) {
+  const expectedClass = linuxElfClass(architecture);
+  const pluginRoot = path.join(
+    extractedRoot,
+    "usr",
+    "lib",
+    "gstreamer-1.0",
+  );
+  const pluginEntries = await readdir(pluginRoot, {
+    withFileTypes: true,
+  }).catch(() => []);
+  const plugins = pluginEntries
+    .filter(
+      (entry) =>
+        (entry.isFile() || entry.isSymbolicLink()) &&
+        entry.name.endsWith(".so"),
+    )
+    .map((entry) => path.join(pluginRoot, entry.name));
+  const mismatches = [];
+  for (const plugin of plugins) {
+    const actualClass = await readElfClass(plugin);
+    if (actualClass !== expectedClass) {
+      mismatches.push(
+        `${path.basename(plugin)} (${actualClass === null ? "not ELF" : `ELF class ${actualClass}`})`,
+      );
+    }
+  }
+  if (mismatches.length) {
+    throw new Error(
+      `AppImage contains GStreamer plugins that do not match ELF class ${expectedClass}: ${mismatches.join(", ")}.`,
+    );
+  }
+  return plugins.length;
+}
+
+export async function verifyAppImageGstreamerPlugins(
+  appImagePath,
+  architecture = os.arch(),
+) {
+  const extractionRoot = await mkdtemp(
+    path.join(os.tmpdir(), "project-master-appimage-verify-"),
+  );
+  try {
+    const extraction = spawnSync(
+      appImagePath,
+      ["--appimage-extract", "usr/lib/gstreamer-1.0/*.so"],
+      {
+        cwd: extractionRoot,
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+    if (extraction.error || extraction.status !== 0) {
+      const detail =
+        extraction.error?.message ||
+        extraction.stderr.trim() ||
+        extraction.stdout.trim() ||
+        `exit status ${extraction.status}`;
+      throw new Error(`Unable to inspect AppImage GStreamer plugins: ${detail}`);
+    }
+    return verifyExtractedGstreamerPluginArchitecture(
+      path.join(extractionRoot, "squashfs-root"),
+      architecture,
+    );
+  } finally {
+    await rm(extractionRoot, { recursive: true, force: true });
+  }
 }
 
 async function verifyVersionsAndConfig() {
@@ -351,6 +429,12 @@ export async function verifyPackaging(argv = process.argv.slice(2)) {
       ) {
         throw new Error(
           `Linux AppImage must use the branded filename ${brandedAppImageName(version)}.`,
+        );
+      }
+      if (process.platform === "linux" && bundle.label === "AppImage") {
+        const pluginCount = await verifyAppImageGstreamerPlugins(matches[0]);
+        console.log(
+          `PASS  AppImage GStreamer plugin architecture (${pluginCount} bundled plugin${pluginCount === 1 ? "" : "s"}).`,
         );
       }
       artifacts.push(...matches);

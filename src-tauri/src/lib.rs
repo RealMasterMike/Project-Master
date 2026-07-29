@@ -1,13 +1,13 @@
 use std::{
-    fs,
-    io::{Read, Write},
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
@@ -19,9 +19,11 @@ const BACKEND_START_TIMEOUT: Duration = Duration::from_secs(20);
 const BACKEND_START_GRACE: Duration = Duration::from_secs(5);
 const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
 const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+const BACKEND_OWNER_SCHEMA_VERSION: u8 = 1;
 
 struct BackendState {
     child: Mutex<Option<ManagedBackend>>,
+    owner: Mutex<Option<BackendOwnerLease>>,
     session_token: String,
 }
 
@@ -29,6 +31,7 @@ impl BackendState {
     fn new() -> Result<Self, String> {
         Ok(Self {
             child: Mutex::new(None),
+            owner: Mutex::new(None),
             session_token: generate_session_token()?,
         })
     }
@@ -39,6 +42,46 @@ struct ManagedBackend {
     started_at: Instant,
 }
 
+#[derive(Debug)]
+struct BackendOwnerLease {
+    file: File,
+    previous: Option<BackendOwnerMetadata>,
+    current: BackendOwnerMetadata,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct BackendOwnerMetadata {
+    schema_version: u8,
+    gui_pid: u32,
+    launcher_pid: Option<u32>,
+    backend_pid: Option<u32>,
+    session_token: String,
+}
+
+impl BackendOwnerMetadata {
+    fn new(session_token: &str) -> Self {
+        Self {
+            schema_version: BACKEND_OWNER_SCHEMA_VERSION,
+            gui_pid: std::process::id(),
+            launcher_pid: None,
+            backend_pid: None,
+            session_token: session_token.to_owned(),
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.schema_version == BACKEND_OWNER_SCHEMA_VERSION
+            && self.gui_pid != 0
+            && self.launcher_pid != Some(0)
+            && self.backend_pid != Some(0)
+            && self.session_token.len() == 64
+            && self
+                .session_token
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BackendPaths {
     data_dir: PathBuf,
@@ -46,6 +89,8 @@ struct BackendPaths {
     database_path: PathBuf,
     workspace_path: PathBuf,
     log_path: PathBuf,
+    pid_path: PathBuf,
+    owner_path: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +112,8 @@ fn backend_paths(data_dir: &Path) -> BackendPaths {
         database_path: data_dir.join("master.db"),
         workspace_path: data_dir.join("workspace"),
         log_path: data_dir.join("backend.log"),
+        pid_path: data_dir.join("backend.pid"),
+        owner_path: data_dir.join("backend-owner.json"),
     }
 }
 
@@ -79,6 +126,139 @@ fn generate_session_token() -> Result<String, String> {
     getrandom::fill(&mut bytes)
         .map_err(|error| format!("Unable to generate a backend session token: {error}"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn read_backend_owner_metadata(file: &mut File) -> Option<BackendOwnerMetadata> {
+    file.rewind().ok()?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw).ok()?;
+    let metadata: BackendOwnerMetadata = serde_json::from_str(&raw).ok()?;
+    metadata.is_valid().then_some(metadata)
+}
+
+fn write_backend_owner_metadata(
+    file: &mut File,
+    metadata: &BackendOwnerMetadata,
+) -> Result<(), String> {
+    let encoded = serde_json::to_vec(metadata)
+        .map_err(|error| format!("Unable to encode backend ownership data: {error}"))?;
+    file.set_len(0)
+        .map_err(|error| format!("Unable to reset backend ownership data: {error}"))?;
+    file.rewind()
+        .map_err(|error| format!("Unable to seek backend ownership data: {error}"))?;
+    file.write_all(&encoded)
+        .map_err(|error| format!("Unable to write backend ownership data: {error}"))?;
+    file.sync_data()
+        .map_err(|error| format!("Unable to persist backend ownership data: {error}"))
+}
+
+fn try_acquire_backend_owner(
+    path: &Path,
+    session_token: &str,
+) -> Result<Option<BackendOwnerLease>, String> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("Unable to open backend ownership data: {error}"))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(fs::TryLockError::Error(error)) => {
+            return Err(format!(
+                "Unable to lock the backend ownership data: {error}"
+            ));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Unable to secure backend ownership data: {error}"))?;
+    }
+
+    let previous = read_backend_owner_metadata(&mut file);
+    Ok(Some(BackendOwnerLease {
+        file,
+        previous,
+        current: BackendOwnerMetadata::new(session_token),
+    }))
+}
+
+fn ensure_backend_owner(
+    state: &BackendState,
+    owner_path: &Path,
+) -> Result<Option<BackendOwnerMetadata>, String> {
+    let mut owner_slot = state
+        .owner
+        .lock()
+        .map_err(|_| "Project Master backend ownership state is unavailable.".to_string())?;
+    if let Some(owner) = owner_slot.as_ref() {
+        return Ok(owner.previous.clone());
+    }
+
+    let Some(owner) = try_acquire_backend_owner(owner_path, &state.session_token)? else {
+        return Err(
+            "Another live Project Master window owns the local backend. \
+             Use that window, or close it before choosing Retry."
+                .to_string(),
+        );
+    };
+    let previous = owner.previous.clone();
+    *owner_slot = Some(owner);
+    Ok(previous)
+}
+
+fn initialize_backend_owner(state: &BackendState) -> Result<(), String> {
+    let mut owner_slot = state
+        .owner
+        .lock()
+        .map_err(|_| "Project Master backend ownership state is unavailable.".to_string())?;
+    let owner = owner_slot
+        .as_mut()
+        .ok_or_else(|| "Project Master does not hold the backend ownership lease.".to_string())?;
+    owner.current.launcher_pid = None;
+    owner.current.backend_pid = None;
+    let current = owner.current.clone();
+    write_backend_owner_metadata(&mut owner.file, &current)?;
+    owner.previous = None;
+    Ok(())
+}
+
+fn record_backend_launcher(state: &BackendState, launcher_pid: u32) -> Result<(), String> {
+    let mut owner_slot = state
+        .owner
+        .lock()
+        .map_err(|_| "Project Master backend ownership state is unavailable.".to_string())?;
+    let owner = owner_slot
+        .as_mut()
+        .ok_or_else(|| "Project Master does not hold the backend ownership lease.".to_string())?;
+    owner.current.launcher_pid = Some(launcher_pid);
+    let current = owner.current.clone();
+    write_backend_owner_metadata(&mut owner.file, &current)
+}
+
+fn record_backend_pid(state: &BackendState, launcher_pid: u32, backend_pid: u32) {
+    let Ok(mut owner_slot) = state.owner.lock() else {
+        return;
+    };
+    let Some(owner) = owner_slot.as_mut() else {
+        return;
+    };
+    if owner.current.launcher_pid != Some(launcher_pid) {
+        return;
+    }
+    owner.current.backend_pid = Some(backend_pid);
+    let current = owner.current.clone();
+    if let Err(error) = write_backend_owner_metadata(&mut owner.file, &current) {
+        eprintln!("{error}");
+    }
 }
 
 fn active_backend_version(
@@ -157,6 +337,15 @@ fn backend_can_be_replaced(uptime: Duration) -> bool {
 
 fn start_backend(app: &AppHandle) -> Result<bool, String> {
     let state = app.state::<BackendState>();
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Unable to locate the Project Master data directory: {error}"))?;
+    let paths = backend_paths(&data_dir);
+    fs::create_dir_all(&paths.data_dir)
+        .map_err(|error| format!("Unable to create the Project Master data directory: {error}"))?;
+    let previous_owner = ensure_backend_owner(&state, &paths.owner_path)?;
+
     let mut child_slot = state
         .child
         .lock()
@@ -196,23 +385,40 @@ fn start_backend(app: &AppHandle) -> Result<bool, String> {
             return Ok(false);
         }
     }
+
     if endpoint_is_open(backend_address()) {
-        let version = active_backend_version(backend_address(), &state.session_token)?;
+        let version = active_backend_version(backend_address(), &state.session_token)
+            .ok()
+            .flatten();
         if backend_version_matches_current(version.as_deref()) {
             return Ok(false);
         }
-        let description = version.unwrap_or_else(|| "an unknown version".to_string());
-        return Err(format!(
-            "An incompatible Project Master backend ({description}) is already using \
-             127.0.0.1:{BACKEND_PORT}. Close the other Project Master window, then choose Retry."
-        ));
+        // A rejected current token does not establish that the other backend is
+        // orphaned. Reclaim only after acquiring the old GUI's released owner
+        // lock and authenticating the backend with that GUI's recorded token.
+        if !previous_owner
+            .as_ref()
+            .is_some_and(|owner| reclaim_orphaned_backend(&paths.pid_path, owner))
+        {
+            let description = version.unwrap_or_else(|| "an unknown version".to_string());
+            return Err(format!(
+                "Another Project Master backend ({description}) is using \
+                 127.0.0.1:{BACKEND_PORT}. Its ownership could not be verified, \
+                 so it was not stopped. Close the other Project Master window or \
+                 backend, then choose Retry."
+            ));
+        }
     }
-
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Unable to locate the Project Master data directory: {error}"))?;
-    let paths = backend_paths(&data_dir);
+    initialize_backend_owner(&state)?;
+    match fs::remove_file(&paths.pid_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Unable to clear stale backend process data: {error}"
+            ));
+        }
+    }
     fs::create_dir_all(&paths.workspace_path)
         .map_err(|error| format!("Unable to create the Project Master data directory: {error}"))?;
 
@@ -228,6 +434,7 @@ fn start_backend(app: &AppHandle) -> Result<bool, String> {
         .env("MASTER_TERMINAL_ENABLED", "true")
         .env("MASTER_TERMINAL_NETWORK_ENABLED", "false")
         .env("MASTER_LOG_PATH", &paths.log_path)
+        .env("MASTER_PID_PATH", &paths.pid_path)
         .env("MASTER_API_PORT", BACKEND_PORT.to_string())
         .env("MASTER_SESSION_TOKEN", &state.session_token);
 
@@ -235,6 +442,10 @@ fn start_backend(app: &AppHandle) -> Result<bool, String> {
         .spawn()
         .map_err(|error| format!("Unable to start the packaged Project Master backend: {error}"))?;
     let pid = child.pid();
+    if let Err(error) = record_backend_launcher(&state, pid) {
+        terminate_process_tree(child);
+        return Err(error);
+    }
     *child_slot = Some(ManagedBackend {
         child,
         started_at: Instant::now(),
@@ -256,6 +467,15 @@ fn start_backend(app: &AppHandle) -> Result<bool, String> {
         if let Ok(mut child_slot) = state.child.lock() {
             clear_child_if_matching(&mut child_slot, pid);
         };
+    });
+
+    let pid_app_handle = app.clone();
+    let pid_path = paths.pid_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(backend_pid) = wait_for_backend_pid(&pid_path, pid, BACKEND_START_TIMEOUT) {
+            let state = pid_app_handle.state::<BackendState>();
+            record_backend_pid(&state, pid, backend_pid);
+        }
     });
 
     Ok(true)
@@ -317,6 +537,163 @@ fn terminate_process_tree(child: CommandChild) {
     }
 }
 
+/// True when the pid belongs to a Project Master backend rather than whatever
+/// unrelated process happened to inherit that pid after the original exited.
+fn is_project_master_backend_image(name: &str) -> bool {
+    let lowercase = name.to_ascii_lowercase();
+    let existing_image = lowercase.strip_suffix(" (deleted)").unwrap_or(&lowercase);
+    let stem = existing_image
+        .strip_suffix(".exe")
+        .unwrap_or(existing_image);
+    stem == "project-master-backend" || stem.starts_with("project-master-backend-")
+}
+
+#[cfg(target_os = "linux")]
+fn pid_is_project_master_backend(pid: u32) -> bool {
+    let executable = PathBuf::from(format!("/proc/{pid}/exe"));
+    let Ok(target) = fs::read_link(executable) else {
+        return false;
+    };
+    target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_project_master_backend_image)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_is_project_master_backend(pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+    else {
+        return false;
+    };
+    Path::new(String::from_utf8_lossy(&output.stdout).trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_project_master_backend_image)
+}
+
+#[cfg(target_os = "windows")]
+fn pid_is_project_master_backend(pid: u32) -> bool {
+    let filter = format!("PID eq {pid}");
+    let Ok(output) = std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return false;
+    };
+    let first_field = String::from_utf8_lossy(&output.stdout)
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('"')
+        .to_owned();
+    is_project_master_backend_image(&first_field)
+}
+
+fn read_backend_pid(pid_path: &Path) -> Option<u32> {
+    let raw = fs::read_to_string(pid_path).ok()?;
+    let pid = raw.trim().parse::<u32>().ok()?;
+    (pid != 0).then_some(pid)
+}
+
+fn wait_for_backend_pid(pid_path: &Path, launcher_pid: u32, timeout: Duration) -> Option<u32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(pid) = read_backend_pid(pid_path) {
+            if pid_is_project_master_backend(pid)
+                && backend_pid_belongs_to_launch(pid, launcher_pid)
+            {
+                return Some(pid);
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn backend_pid_belongs_to_launch(backend_pid: u32, launcher_pid: u32) -> bool {
+    backend_pid == launcher_pid || collect_descendant_pids(launcher_pid).contains(&backend_pid)
+}
+
+#[cfg(target_os = "windows")]
+fn backend_pid_belongs_to_launch(_backend_pid: u32, _launcher_pid: u32) -> bool {
+    // The pid file is removed immediately before spawning and its path is
+    // supplied only to that sidecar. The process image is validated separately.
+    true
+}
+
+fn stale_backend_matches_owner(
+    owner: &BackendOwnerMetadata,
+    authenticated_version: Option<&str>,
+    observed_pid: u32,
+) -> bool {
+    owner.is_valid()
+        && authenticated_version.is_some()
+        && owner
+            .backend_pid
+            .is_none_or(|recorded_pid| recorded_pid == observed_pid)
+}
+
+/// Stop a backend left holding the loopback port by an earlier run.
+///
+/// The caller must already hold the previous GUI's released owner lock. The
+/// recorded token proves that the process answering on the port belongs to that
+/// dead GUI; the pid and image checks prevent killing an unrelated reused pid.
+fn reclaim_orphaned_backend(pid_path: &Path, owner: &BackendOwnerMetadata) -> bool {
+    let Some(pid) = read_backend_pid(pid_path) else {
+        return false;
+    };
+    let authenticated_version = active_backend_version(backend_address(), &owner.session_token)
+        .ok()
+        .flatten();
+    if !stale_backend_matches_owner(owner, authenticated_version.as_deref(), pid) {
+        return false;
+    }
+    if !pid_is_project_master_backend(pid) {
+        return false;
+    }
+    for force in [false, true] {
+        terminate_orphaned_backend(pid, force);
+        if wait_for_endpoint_closed(backend_address(), BACKEND_START_GRACE) {
+            let _ = fs::remove_file(pid_path);
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminate_orphaned_backend(pid: u32, force: bool) {
+    let signal = if force { "-KILL" } else { "-TERM" };
+    let mut targets = collect_descendant_pids(pid);
+    targets.push(pid);
+    for target in targets {
+        let _ = std::process::Command::new("kill")
+            .args([signal, &target.to_string()])
+            .status();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_orphaned_backend(pid: u32, force: bool) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let pid = pid.to_string();
+    let mut command = std::process::Command::new("taskkill");
+    command.args(["/PID", &pid, "/T"]);
+    if force {
+        command.arg("/F");
+    }
+    let _ = command.creation_flags(CREATE_NO_WINDOW).status();
+}
+
 #[cfg(not(target_os = "windows"))]
 fn collect_descendant_pids(root: u32) -> Vec<u32> {
     let Ok(output) = std::process::Command::new("ps")
@@ -331,6 +708,7 @@ fn collect_descendant_pids(root: u32) -> Vec<u32> {
     )
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn parse_process_table(table: &str) -> Vec<(u32, u32)> {
     table
         .lines()
@@ -343,6 +721,7 @@ fn parse_process_table(table: &str) -> Vec<(u32, u32)> {
         .collect()
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn descendants_of(edges: &[(u32, u32)], root: u32) -> Vec<u32> {
     let mut result: Vec<u32> = Vec::new();
     let mut frontier = vec![root];
@@ -396,6 +775,33 @@ pub fn run() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
+    // The AppImage bundler can stage wrong-architecture GStreamer plugins (32-bit
+    // i386 alongside a 64-bit libgstreamer), and its AppRun points the plugin path
+    // at that directory. WebKit then cannot build any media pipeline — "appsink
+    // not found" — and the web process dies the first time audio plays, taking the
+    // window with it. Append the host's plugin directories so a bundled path that
+    // is empty or unusable still resolves. Appending (rather than replacing) keeps
+    // any genuinely bundled plugins ahead of the system ones.
+    #[cfg(target_os = "linux")]
+    {
+        let existing = std::env::var("GST_PLUGIN_SYSTEM_PATH_1_0").unwrap_or_default();
+        let mut entries: Vec<String> = existing
+            .split(':')
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let mut appended = false;
+        for candidate in ["/usr/lib64/gstreamer-1.0", "/usr/lib/gstreamer-1.0"] {
+            if Path::new(candidate).is_dir() && !entries.iter().any(|entry| entry == candidate) {
+                entries.push(candidate.to_owned());
+                appended = true;
+            }
+        }
+        if appended {
+            std::env::set_var("GST_PLUGIN_SYSTEM_PATH_1_0", entries.join(":"));
+        }
+    }
+
     let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
@@ -438,6 +844,108 @@ mod tests {
         assert_eq!(paths.database_path, base.join("master.db"));
         assert_eq!(paths.workspace_path, base.join("workspace"));
         assert_eq!(paths.log_path, base.join("backend.log"));
+        assert_eq!(paths.pid_path, base.join("backend.pid"));
+        assert_eq!(paths.owner_path, base.join("backend-owner.json"));
+    }
+
+    #[test]
+    fn reclaim_refuses_without_a_readable_pid_file() {
+        // No pid file means no handle to an orphan, so startup must not
+        // silently believe it freed the port.
+        let missing = PathBuf::from("test-data/definitely-absent.pid");
+        assert!(!reclaim_orphaned_backend(
+            &missing,
+            &BackendOwnerMetadata::new(&"1".repeat(64))
+        ));
+    }
+
+    #[test]
+    fn reclaim_refuses_a_malformed_pid_file() {
+        let dir = std::env::temp_dir().join("pm-pid-test");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("backend.pid");
+        fs::write(&path, "not-a-pid").unwrap();
+        assert!(!reclaim_orphaned_backend(
+            &path,
+            &BackendOwnerMetadata::new(&"1".repeat(64))
+        ));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn owner_lock_excludes_a_second_live_gui_and_recovers_after_drop() {
+        let path = std::env::temp_dir().join(format!(
+            "pm-owner-lock-{}.json",
+            generate_session_token().unwrap()
+        ));
+        let first = try_acquire_backend_owner(&path, &"1".repeat(64))
+            .unwrap()
+            .expect("first owner");
+        assert!(try_acquire_backend_owner(&path, &"2".repeat(64))
+            .unwrap()
+            .is_none());
+
+        drop(first);
+        assert!(try_acquire_backend_owner(&path, &"2".repeat(64))
+            .unwrap()
+            .is_some());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn stale_backend_requires_the_recorded_token_and_pid_identity() {
+        let mut owner = BackendOwnerMetadata::new(&"a".repeat(64));
+        owner.backend_pid = Some(42);
+
+        assert!(stale_backend_matches_owner(&owner, Some("0.3.0"), 42));
+        assert!(!stale_backend_matches_owner(&owner, None, 42));
+        assert!(!stale_backend_matches_owner(&owner, Some("0.3.0"), 99));
+
+        owner.session_token = "not-a-token".to_string();
+        assert!(!stale_backend_matches_owner(&owner, Some("0.3.0"), 42));
+    }
+
+    #[test]
+    fn owner_metadata_round_trips_through_the_locked_file() {
+        let path = std::env::temp_dir().join(format!(
+            "pm-owner-data-{}.json",
+            generate_session_token().unwrap()
+        ));
+        let token = "b".repeat(64);
+        let mut lease = try_acquire_backend_owner(&path, &token)
+            .unwrap()
+            .expect("owner");
+        lease.current.launcher_pid = Some(100);
+        lease.current.backend_pid = Some(101);
+        let expected = lease.current.clone();
+        write_backend_owner_metadata(&mut lease.file, &expected).unwrap();
+        assert_eq!(read_backend_owner_metadata(&mut lease.file), Some(expected));
+        drop(lease);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn our_own_pid_is_not_mistaken_for_a_backend() {
+        // Guards against killing an unrelated process that inherited the pid.
+        assert!(!pid_is_project_master_backend(std::process::id()));
+    }
+
+    #[test]
+    fn backend_image_matching_accepts_packaged_and_target_suffixed_sidecars() {
+        assert!(is_project_master_backend_image("project-master-backend"));
+        assert!(is_project_master_backend_image(
+            "project-master-backend-x86_64-unknown-linux-gnu"
+        ));
+        assert!(is_project_master_backend_image(
+            "PROJECT-MASTER-BACKEND.EXE"
+        ));
+        assert!(is_project_master_backend_image(
+            "project-master-backend (deleted)"
+        ));
+        assert!(!is_project_master_backend_image("master"));
+        assert!(!is_project_master_backend_image(
+            "not-project-master-backend"
+        ));
     }
 
     #[test]

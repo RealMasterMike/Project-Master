@@ -5,9 +5,19 @@ import json
 import math
 import unicodedata
 from datetime import UTC, datetime
-from typing import Literal
+from enum import StrEnum
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class VoiceWorkflowOrigin(StrEnum):
+    VOICE_STUDIO = "voice_studio"
+    CHAT_SPEECH = "chat_speech"
+
+    @property
+    def studio_visible(self) -> bool:
+        return self is self.VOICE_STUDIO
 
 
 class PronunciationEntry(BaseModel):
@@ -93,6 +103,7 @@ class VoiceProject(BaseModel):
     )
     blocks: tuple[ScriptBlock, ...]
     pronunciations: tuple[PronunciationEntry, ...] = ()
+    origin: VoiceWorkflowOrigin = VoiceWorkflowOrigin.VOICE_STUDIO
     created_at: datetime
     revision: int = Field(default=1, ge=1)
     digest: str
@@ -107,6 +118,7 @@ class VoiceProject(BaseModel):
         default_voice_profile_id: str,
         blocks: tuple[ScriptBlock, ...] | list[ScriptBlock],
         pronunciations: tuple[PronunciationEntry, ...] | list[PronunciationEntry] = (),
+        origin: VoiceWorkflowOrigin = VoiceWorkflowOrigin.VOICE_STUDIO,
         created_at: datetime | None = None,
         revision: int = 1,
     ) -> VoiceProject:
@@ -133,10 +145,23 @@ class VoiceProject(BaseModel):
             default_voice_profile_id=default_voice_profile_id,
             blocks=block_tuple,
             pronunciations=pronunciation_tuple,
+            origin=origin,
             created_at=timestamp,
             revision=revision,
             digest=digest,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_chat_speech_origin(cls, value: Any) -> Any:
+        """Classify chat-speech records written before origin metadata existed."""
+        if (
+            isinstance(value, dict)
+            and "origin" not in value
+            and str(value.get("id", "")).startswith("chat-speech-")
+        ):
+            return {**value, "origin": VoiceWorkflowOrigin.CHAT_SPEECH}
+        return value
 
     @field_validator("created_at")
     @classmethod
@@ -183,6 +208,10 @@ class VoiceProject(BaseModel):
                 if block.kind != "direction"
             )
         )
+
+    @property
+    def studio_visible(self) -> bool:
+        return self.origin.studio_visible
 
     def applicable_pronunciations(
         self, text: str, language: str

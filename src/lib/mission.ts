@@ -5,6 +5,7 @@ export type MissionPhase =
   | "council"
   | "workers"
   | "synthesis"
+  | "lead"
   | "delivered"
   | "cancelled"
   | "failed";
@@ -17,7 +18,7 @@ export interface MissionDecision {
 
 export interface MissionToolEvent {
   tool: string;
-  ok: boolean;
+  outcome: NonNullable<ProjectMasterRunActivity["outcome"]>;
 }
 
 export interface MissionState {
@@ -39,6 +40,8 @@ const DECISION_KINDS = new Set([
   "synthesis_failed",
   "council_completed",
   "council_cancelled",
+  "triage_completed",
+  "triage_skipped",
 ]);
 
 function decisionLabel(activity: ProjectMasterRunActivity): string {
@@ -57,9 +60,13 @@ function decisionLabel(activity: ProjectMasterRunActivity): string {
     case "synthesis_failed":
       return "lead synthesis failed";
     case "council_completed":
-      return "delivered";
+      return "council ready";
     case "council_cancelled":
       return "run cancelled";
+    case "triage_completed":
+      return "specialists selected";
+    case "triage_skipped":
+      return "specialist not needed";
     default:
       return activity.kind.replace(/_/g, " ");
   }
@@ -74,6 +81,7 @@ export function deriveMissionState(
   let activeWorker: ProjectMasterRunActivity | null = null;
   let sawCouncil = false;
   let sawSynthesis = false;
+  let sawLead = false;
   let delivered = false;
   let cancelled = false;
   let synthesisFailed = false;
@@ -110,16 +118,28 @@ export function deriveMissionState(
         sawSynthesis = true;
         synthesisFailed = true;
         break;
-      case "council_completed":
+      case "delivery_completed":
         delivered = true;
         break;
       case "council_cancelled":
         cancelled = true;
         break;
+      case "lead_started":
+        sawLead = true;
+        break;
       case "tool_completed":
       case "tool_failed":
+      case "tool_skipped":
+      case "tool_unavailable":
+      case "tool_blocked":
+      case "tool_cancelled":
         if (activity.tool) {
-          toolEvents.push({ tool: activity.tool, ok: activity.ok !== false });
+          toolEvents.push({
+            tool: activity.tool,
+            outcome:
+              activity.outcome ??
+              (activity.ok === false ? "failed" : "success"),
+          });
         }
         break;
       default:
@@ -140,6 +160,7 @@ export function deriveMissionState(
   if (cancelled) phase = "cancelled";
   else if (delivered) phase = "delivered";
   else if (synthesisFailed && !isStreaming) phase = "failed";
+  else if (sawLead) phase = "lead";
   else if (sawSynthesis) phase = "synthesis";
   else if (activeWorker || workersCompleted || workersFailed) phase = "workers";
   else if (sawCouncil) phase = "council";
@@ -159,6 +180,9 @@ export function deriveMissionState(
     case "synthesis":
       statusLine = "Lead synthesizing…";
       break;
+    case "lead":
+      statusLine = "Lead completing the response…";
+      break;
     case "workers":
       statusLine = activeWorker
         ? `${activeWorker.role ?? "specialist"} working…`
@@ -175,6 +199,8 @@ export function deriveMissionState(
   let progress = 0;
   if (phase === "delivered" || phase === "cancelled" || phase === "failed") {
     progress = 1;
+  } else if (phase === "lead") {
+    progress = 0.94;
   } else if (phase === "synthesis") {
     progress = 0.85;
   } else if (phase === "workers") {

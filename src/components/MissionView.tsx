@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { deriveMissionState } from "../lib/mission";
@@ -12,6 +13,7 @@ interface MissionViewProps {
   answerStatus: "complete" | "streaming" | "stopped" | "error";
   answerError?: string;
   onRetry?: () => void;
+  deliveryAction?: ReactNode;
 }
 
 export function MissionView({
@@ -23,6 +25,7 @@ export function MissionView({
   answerStatus,
   answerError,
   onRetry,
+  deliveryAction,
 }: MissionViewProps) {
   const mission = deriveMissionState(activities, isStreaming);
   const showDelivery =
@@ -59,6 +62,7 @@ export function MissionView({
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.round(mission.progress * 100)}
+          aria-valuetext={mission.statusLine}
         >
           <span
             className={`mission-view__progress-fill ${
@@ -78,9 +82,10 @@ export function MissionView({
             {mission.toolEvents.map((event, index) => (
               <li
                 key={`${event.tool}-${index}`}
-                className={event.ok ? undefined : "is-failed"}
+                className={`is-${event.outcome}`}
               >
-                {event.ok ? "✓" : "✗"} {event.tool}
+                <strong>{event.tool}</strong>
+                <span>{event.outcome}</span>
               </li>
             ))}
           </ul>
@@ -106,7 +111,10 @@ export function MissionView({
 
       {showDelivery && answer ? (
         <section className="mission-view__section mission-view__delivery">
-          <h3>Delivery</h3>
+          <header>
+            <h3>Delivery</h3>
+            {deliveryAction}
+          </header>
           <div className="message-content">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>
           </div>

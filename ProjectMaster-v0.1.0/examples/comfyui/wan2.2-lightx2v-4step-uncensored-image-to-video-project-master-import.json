@@ -1,0 +1,339 @@
+{
+  "bindings": [
+    {
+      "choices": [],
+      "default_value": null,
+      "description": "Verified project image to animate.",
+      "id": "source_image",
+      "input_name": "image",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "10",
+      "required": true,
+      "value_type": "image_asset"
+    },
+    {
+      "choices": [],
+      "default_value": "Natural cinematic motion that preserves the source subject, stable camera, coherent details.",
+      "description": "Describe how the source image should move.",
+      "id": "prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "8",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": "oversaturated, overexposed, static, blurry details, subtitles, watermark, painting, gray cast, worst quality, low quality, JPEG artifacts, malformed anatomy, extra limbs, fused details, chaotic background, reverse motion",
+      "description": "Visual qualities to discourage.",
+      "id": "negative_prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "9",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": 123456789,
+      "description": "Deterministic generation seed.",
+      "id": "seed",
+      "input_name": "noise_seed",
+      "maximum": 2147483647,
+      "minimum": 0,
+      "node_id": "12",
+      "required": false,
+      "value_type": "integer"
+    },
+    {
+      "choices": [
+        384,
+        512,
+        640,
+        832
+      ],
+      "default_value": 512,
+      "description": "Output width. Larger sizes require more time and memory.",
+      "id": "width",
+      "input_name": "width",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "11",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        224,
+        288,
+        352,
+        480
+      ],
+      "default_value": 288,
+      "description": "Output height. Larger sizes require more time and memory.",
+      "id": "height",
+      "input_name": "height",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "11",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        9,
+        17,
+        33,
+        49,
+        65,
+        81
+      ],
+      "default_value": 33,
+      "description": "Number of generated frames. More frames take longer.",
+      "id": "frames",
+      "input_name": "length",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "11",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        12,
+        16,
+        24
+      ],
+      "default_value": 16,
+      "description": "Playback frames per second.",
+      "id": "fps",
+      "input_name": "fps",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "17",
+      "required": false,
+      "value_type": "enum"
+    }
+  ],
+  "name": "Wan 2.2 LightX2V 4-Step Uncensored — Image to Video",
+  "purpose": "video",
+  "workflow": {
+    "1": {
+      "class_type": "UnetLoaderGGUF",
+      "inputs": {
+        "unet_name": "Wan2.2-I2V-A14B-HighNoise-Q3_K_S.gguf"
+      }
+    },
+    "2": {
+      "class_type": "UnetLoaderGGUF",
+      "inputs": {
+        "unet_name": "Wan2.2-I2V-A14B-LowNoise-Q3_K_S.gguf"
+      }
+    },
+    "3": {
+      "class_type": "LoraLoaderModelOnly",
+      "inputs": {
+        "lora_name": "Wan2.2_LightX2V_high_n54vv.safetensors",
+        "model": [
+          "1",
+          0
+        ],
+        "strength_model": 1
+      }
+    },
+    "4": {
+      "class_type": "LoraLoaderModelOnly",
+      "inputs": {
+        "lora_name": "Wan2.2_LightX2V_low_n54vv.safetensors",
+        "model": [
+          "2",
+          0
+        ],
+        "strength_model": 1
+      }
+    },
+    "5": {
+      "class_type": "ModelSamplingSD3",
+      "inputs": {
+        "model": [
+          "3",
+          0
+        ],
+        "shift": 5
+      }
+    },
+    "6": {
+      "class_type": "ModelSamplingSD3",
+      "inputs": {
+        "model": [
+          "4",
+          0
+        ],
+        "shift": 5
+      }
+    },
+    "7": {
+      "class_type": "CLIPLoaderGGUF",
+      "inputs": {
+        "clip_name": "umt5-xxl-encoder-Q3_K_M.gguf",
+        "type": "wan"
+      }
+    },
+    "8": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "7",
+          0
+        ],
+        "text": "Natural cinematic motion that preserves the source subject, stable camera, coherent details."
+      }
+    },
+    "9": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "7",
+          0
+        ],
+        "text": "oversaturated, overexposed, static, blurry details, subtitles, watermark, painting, gray cast, worst quality, low quality, JPEG artifacts, malformed anatomy, extra limbs, fused details, chaotic background, reverse motion"
+      }
+    },
+    "10": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "example.png"
+      }
+    },
+    "11": {
+      "class_type": "WanImageToVideo",
+      "inputs": {
+        "batch_size": 1,
+        "height": 288,
+        "length": 33,
+        "negative": [
+          "9",
+          0
+        ],
+        "positive": [
+          "8",
+          0
+        ],
+        "start_image": [
+          "10",
+          0
+        ],
+        "vae": [
+          "14",
+          0
+        ],
+        "width": 512
+      }
+    },
+    "12": {
+      "class_type": "KSamplerAdvanced",
+      "inputs": {
+        "add_noise": "enable",
+        "cfg": 1,
+        "end_at_step": 2,
+        "latent_image": [
+          "11",
+          2
+        ],
+        "model": [
+          "5",
+          0
+        ],
+        "negative": [
+          "11",
+          1
+        ],
+        "noise_seed": 123456789,
+        "positive": [
+          "11",
+          0
+        ],
+        "return_with_leftover_noise": "enable",
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "start_at_step": 0,
+        "steps": 4
+      }
+    },
+    "13": {
+      "class_type": "KSamplerAdvanced",
+      "inputs": {
+        "add_noise": "disable",
+        "cfg": 1,
+        "end_at_step": 4,
+        "latent_image": [
+          "12",
+          0
+        ],
+        "model": [
+          "6",
+          0
+        ],
+        "negative": [
+          "11",
+          1
+        ],
+        "noise_seed": 123456789,
+        "positive": [
+          "11",
+          0
+        ],
+        "return_with_leftover_noise": "disable",
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "start_at_step": 2,
+        "steps": 4
+      }
+    },
+    "14": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "wan_2.1_vae.safetensors"
+      }
+    },
+    "15": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "13",
+          0
+        ],
+        "vae": [
+          "14",
+          0
+        ]
+      }
+    },
+    "17": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "bit_depth": 8,
+        "fps": 16,
+        "images": [
+          "15",
+          0
+        ]
+      }
+    },
+    "18": {
+      "class_type": "SaveVideo",
+      "inputs": {
+        "codec": "h264",
+        "filename_prefix": "ProjectMaster/wan2.2-lightx2v-4step-uncensored-i2v",
+        "format": "mp4",
+        "video": [
+          "17",
+          0
+        ]
+      }
+    }
+  }
+}

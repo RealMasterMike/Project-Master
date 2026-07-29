@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 ProjectStatus = Literal["active", "archived"]
+ProjectType = Literal["general", "creator"]
 RunStatus = Literal[
     "planned",
     "waiting_approval",
@@ -49,6 +50,7 @@ class ProjectSpec:
     name: str
     root_path: str | None = None
     description: str = ""
+    project_type: ProjectType = "general"
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

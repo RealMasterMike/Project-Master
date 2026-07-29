@@ -4,6 +4,10 @@ export const CURRENT_RELEASE_STAGE: ReleaseStage = "beta";
 export const DAILY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 export const WEEKLY_UPDATE_CHECK_INTERVAL_MS = 7 * DAILY_UPDATE_CHECK_INTERVAL_MS;
 
+export function getReleaseChannelLabel(stage: ReleaseStage): string {
+  return `${stage[0].toUpperCase()}${stage.slice(1)}`;
+}
+
 export function getUpdateCheckIntervalMs(stage: ReleaseStage): number {
   return stage === "alpha"
     ? DAILY_UPDATE_CHECK_INTERVAL_MS

@@ -7,6 +7,7 @@ from typing import Any
 from project_master.memory.store import SQLiteStore
 
 LOCAL_GPU_INFERENCE_RESOURCE = "local-gpu-inference"
+INTERACTIVE_CHAT_OWNER_PREFIX = "interactive-chat:"
 
 
 class ResourceGovernor:
@@ -96,6 +97,21 @@ class ResourceGovernor:
                 (resource_key, owner),
             )
             return cursor.rowcount > 0
+
+    def release_process_scoped(self, owner_prefix: str) -> int:
+        """Drop leases whose owner cannot outlive the process that took them.
+
+        Interactive chat and voice-render leases are released in a `finally`,
+        so they only survive if the backend was killed mid-request (SIGKILL
+        skips `finally`). Such a lease is orphaned by definition, but its TTL
+        keeps blocking other consumers until it expires.
+        """
+        with self.store.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM resource_leases WHERE owner LIKE ?",
+                (f"{owner_prefix}%",),
+            )
+            return cursor.rowcount
 
     def status(self, resource_key: str) -> dict[str, Any] | None:
         now = datetime.now(UTC)

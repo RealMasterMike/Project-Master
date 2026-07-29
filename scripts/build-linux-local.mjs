@@ -3,6 +3,7 @@ import {
   copyFile,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -45,6 +46,13 @@ export function linuxArtifactArchitecture(architecture = os.arch()) {
     );
   }
   return artifactArchitecture;
+}
+
+export function linuxElfClass(architecture = os.arch()) {
+  // Validate through the public artifact mapping so both helpers accept the
+  // same set of local Linux architectures.
+  linuxArtifactArchitecture(architecture);
+  return architecture === "arm" ? 1 : 2;
 }
 
 export function brandedAppImageName(version, architecture = os.arch()) {
@@ -154,6 +162,155 @@ export async function verifyStagedAppDir(appDir) {
   ]);
 }
 
+/**
+ * Drop staged GStreamer plugins that do not match the AppImage architecture.
+ *
+ * The bundler can pick i386 plugins from a multilib host and stage them beside
+ * a 64-bit libgstreamer. WebKit then finds a plugin directory containing only
+ * unloadable objects, cannot construct `appsink`/`autoaudiosink`, and its web
+ * process crashes the first time audio plays. An empty directory is safer: the
+ * host's matching plugin registry is used instead.
+ */
+export async function removeForeignArchitectureGstPlugins(
+  appDir,
+  architecture = os.arch(),
+) {
+  const pluginDir = path.join(appDir, "usr", "lib", "gstreamer-1.0");
+  const expectedClass = linuxElfClass(architecture);
+  let entries;
+  try {
+    entries = await readdir(pluginDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const removed = [];
+  for (const entry of entries) {
+    if (
+      (!entry.isFile() && !entry.isSymbolicLink()) ||
+      !entry.name.endsWith(".so")
+    ) {
+      continue;
+    }
+    const pluginPath = path.join(pluginDir, entry.name);
+    if ((await readElfClass(pluginPath)) === expectedClass) continue;
+    await rm(pluginPath, { force: true });
+    removed.push(entry.name);
+  }
+  return removed;
+}
+
+/**
+ * Module directories that a 64-bit runtime dlopen()s by scanning, beyond GStreamer's.
+ *
+ * These share the GStreamer failure mode: the loader finds a populated directory, every
+ * object in it is unloadable, and the feature silently dies instead of falling back to the
+ * host. `gio/modules` shipped a lone i386 `libgiognutls.so` in 0.4.0 — that is GIO's TLS
+ * backend, so leaving it risks breaking HTTPS rather than merely wasting space.
+ */
+const FOREIGN_MODULE_DIRS = [path.join("usr", "lib", "gio", "modules")];
+
+/**
+ * Drop staged loadable modules that do not match the AppImage architecture.
+ *
+ * Same reasoning as the GStreamer plugin sweep: an empty directory is safer than one
+ * holding only foreign objects, because the host's matching modules are then used.
+ */
+export async function removeForeignArchitectureModules(
+  appDir,
+  architecture = os.arch(),
+) {
+  const expectedClass = linuxElfClass(architecture);
+  const removed = [];
+  for (const relative of FOREIGN_MODULE_DIRS) {
+    const dir = path.join(appDir, relative);
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (
+        (!entry.isFile() && !entry.isSymbolicLink()) ||
+        !entry.name.endsWith(".so")
+      ) {
+        continue;
+      }
+      const modulePath = path.join(dir, entry.name);
+      if ((await readElfClass(modulePath)) === expectedClass) continue;
+      await rm(modulePath, { force: true });
+      removed.push(path.join(relative, entry.name));
+    }
+  }
+  return removed;
+}
+
+/**
+ * Drop staged library directories whose objects do not match the AppImage architecture.
+ *
+ * Same root cause as the plugin sweep above: on a multilib host the bundler also stages
+ * whole `lib32`/`lib64` trees. Those libraries are never loadable by the packaged binary
+ * and nothing puts them on the library path, so they are pure weight — the 0.4.0 AppImage
+ * carried 18 MB of i386 objects including a second `libgstreamer-1.0.so.0`. Removing them
+ * also stops a future loader-path change from resurrecting the crash the plugin sweep
+ * fixed.
+ *
+ * A directory is only removed when it is non-empty and *every* ELF object in it is
+ * foreign, so a correctly-staged directory can never be deleted by this.
+ */
+export async function removeForeignArchitectureLibDirs(
+  appDir,
+  architecture = os.arch(),
+) {
+  const expectedClass = linuxElfClass(architecture);
+  const removed = [];
+  for (const candidate of ["lib32", "lib64", "libx32"]) {
+    const dir = path.join(appDir, "usr", candidate);
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    let sawElf = false;
+    let allForeign = true;
+    for (const entry of entries) {
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+      const elfClass = await readElfClass(path.join(dir, entry.name));
+      if (elfClass === null) continue;
+      sawElf = true;
+      if (elfClass === expectedClass) {
+        allForeign = false;
+        break;
+      }
+    }
+    if (!sawElf || !allForeign) continue;
+    await rm(dir, { recursive: true, force: true });
+    removed.push(candidate);
+  }
+  return removed;
+}
+
+/** Read the ELF class byte (index 4): 2 is 64-bit, 1 is 32-bit. */
+export async function readElfClass(filePath) {
+  const handle = await open(filePath, "r");
+  try {
+    const header = Buffer.alloc(5);
+    const { bytesRead } = await handle.read(header, 0, 5, 0);
+    if (bytesRead < 5) return null;
+    const isElf =
+      header[0] === 0x7f &&
+      header[1] === 0x45 &&
+      header[2] === 0x4c &&
+      header[3] === 0x46;
+    return isElf && (header[4] === 1 || header[4] === 2)
+      ? header[4]
+      : null;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function finalizeLinuxAppImage({
   bundleRoot,
   version,
@@ -201,6 +358,36 @@ export async function finalizeLinuxAppImage({
   await chmod(destination, 0o755);
   await requireNonEmptyFile(destination, "Branded AppImage");
   return destination;
+}
+
+/**
+ * Produce the final AppImage only after its staged AppDir is architecture-clean.
+ *
+ * Tauri's bundle command can already have emitted an AppImage by the time the
+ * caller regains control. That artifact is discarded and the output plugin is
+ * run again through `produceArtifact`, guaranteeing that the retained image was
+ * created from the cleaned tree rather than merely cleaning the tree afterward.
+ */
+export async function createLinuxAppImageFromStagedDir({
+  bundleRoot,
+  version,
+  architecture = os.arch(),
+  produceArtifact,
+}) {
+  if (typeof produceArtifact !== "function") {
+    throw new TypeError("An AppImage artifact producer is required.");
+  }
+  const appDir = path.join(
+    bundleRoot,
+    `${APPIMAGE_PRODUCT_NAME}.AppDir`,
+  );
+  await verifyStagedAppDir(appDir);
+  await removeForeignArchitectureGstPlugins(appDir, architecture);
+  await removeForeignArchitectureModules(appDir, architecture);
+  await removeForeignArchitectureLibDirs(appDir, architecture);
+  await removeKnownAppImageOutputs(bundleRoot);
+  await produceArtifact(appDir);
+  return finalizeLinuxAppImage({ bundleRoot, version, architecture });
 }
 
 export function tauriCacheDirectory(
@@ -390,7 +577,7 @@ export async function buildLocalLinux() {
     if (tauriBundleError) {
       // A known RELR-only linuxdeploy exit can occur after Tauri has fully
       // staged and marked the AppDir. Validate that state before bypassing only
-      // the obsolete deploy/strip phase and invoking Tauri's output plugin.
+      // the obsolete deploy/strip phase.
       try {
         await verifyStagedAppDir(stagedAppDir);
       } catch (stagingError) {
@@ -399,28 +586,35 @@ export async function buildLocalLinux() {
           "Tauri AppImage bundling failed before a valid AppDir was staged.",
         );
       }
-      await removeKnownAppImageOutputs(appImageBundleRoot);
-      const outputPlugin = appImageOutputPluginPath(env);
-      await requireNonEmptyFile(
-        outputPlugin,
-        "Tauri cached AppImage output plugin",
-      );
-      await chmod(outputPlugin, 0o755);
-      await run(
-        outputPlugin,
-        ["--appimage-extract-and-run", "--appdir", stagedAppDir],
-        {
-          cwd: appImageBundleRoot,
-          env: {
-            ...env,
-            ARCH: linuxArtifactArchitecture(),
-          },
-        },
-      );
     }
-    const appImage = await finalizeLinuxAppImage({
+    const architecture = os.arch();
+    const outputPlugin = appImageOutputPluginPath(env);
+    await requireNonEmptyFile(
+      outputPlugin,
+      "Tauri cached AppImage output plugin",
+    );
+    await chmod(outputPlugin, 0o755);
+    // Even when Tauri's first bundle succeeds, discard that image and invoke
+    // the output plugin again after removing foreign plugins from the AppDir.
+    // Otherwise the staged tree is clean but the already-created artifact is
+    // still contaminated.
+    const appImage = await createLinuxAppImageFromStagedDir({
       bundleRoot: appImageBundleRoot,
       version,
+      architecture,
+      produceArtifact: async (cleanAppDir) => {
+        await run(
+          outputPlugin,
+          ["--appimage-extract-and-run", "--appdir", cleanAppDir],
+          {
+            cwd: appImageBundleRoot,
+            env: {
+              ...env,
+              ARCH: linuxArtifactArchitecture(architecture),
+            },
+          },
+        );
+      },
     });
     console.log(`Finalized ${path.relative(repoRoot, appImage)}.`);
 

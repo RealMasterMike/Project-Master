@@ -25,9 +25,14 @@ def build_store(tmp_path: Path) -> tuple[OrchestrationStore, SQLiteStore]:
 
 def test_project_run_task_handoff_artifact_and_verification_round_trip(tmp_path: Path) -> None:
     store, _sqlite = build_store(tmp_path)
-    project_spec = ProjectSpec(name="Creator project", root_path="/tmp/project")
+    project_spec = ProjectSpec(
+        name="Creator project",
+        root_path="/tmp/project",
+        project_type="creator",
+    )
     project_id = store.get_or_create_project(project_spec)
     assert store.get_or_create_project(project_spec) == project_id
+    assert store.get_project(project_id)["project_type"] == "creator"  # type: ignore[index]
     run_id = store.create_run(
         RunSpec(project_id=project_id, kind="team", objective="Produce a verified draft")
     )
@@ -151,15 +156,60 @@ def test_project_dreaming_consent_preserves_unrelated_metadata(tmp_path: Path) -
         "owner": "mike",
         "nested": {"keep": True},
         "allow_dreaming": True,
+        "project_type": "general",
     }
     assert disabled["metadata"] == {
         "owner": "mike",
         "nested": {"keep": True},
         "allow_dreaming": False,
+        "project_type": "general",
     }
     assert store.get_project(project_id) == disabled
     with pytest.raises(KeyError, match="Unknown project"):
         store.set_project_dreaming("project_missing", True)
+
+
+def test_project_type_is_validated_and_overrides_untrusted_metadata(tmp_path: Path) -> None:
+    store, sqlite = build_store(tmp_path)
+    project_id = store.create_project(
+        ProjectSpec(
+            name="Creator",
+            project_type="creator",
+            metadata={"project_type": "general", "owner": "local"},
+        )
+    )
+
+    project = store.get_project(project_id)
+
+    assert project is not None
+    assert project["project_type"] == "creator"
+    assert project["metadata"] == {
+        "owner": "local",
+        "project_type": "creator",
+    }
+    assert [item["id"] for item in store.list_projects(project_type="creator")] == [
+        project_id
+    ]
+    assert store.list_projects(project_type="general") == []
+    with pytest.raises(ValueError, match="Unsupported project type"):
+        store.create_project(ProjectSpec(name="Invalid", project_type="unknown"))  # type: ignore[arg-type]
+
+    general_id = store.create_project(ProjectSpec(name="Shared", root_path="/same"))
+    creator_id = store.get_or_create_project(
+        ProjectSpec(name="Shared", root_path="/same", project_type="creator")
+    )
+    assert creator_id != general_id
+    assert store.get_or_create_project(
+        ProjectSpec(name="Shared", root_path="/same", project_type="creator")
+    ) == creator_id
+
+    legacy_id = store.create_project(ProjectSpec(name="Legacy"))
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE projects SET metadata_json = '{}' WHERE id = ?",
+            (legacy_id,),
+        )
+    assert store.get_project(legacy_id)["project_type"] == "general"  # type: ignore[index]
 
 
 def test_approval_must_be_resolved_once(tmp_path: Path) -> None:

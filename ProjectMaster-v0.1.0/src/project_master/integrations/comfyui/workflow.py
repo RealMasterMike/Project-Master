@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -10,7 +11,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-BindingType = Literal["string", "integer", "number", "boolean", "enum"]
+BindingType = Literal["string", "integer", "number", "boolean", "enum", "image_asset"]
+WorkflowPurpose = Literal["general", "image", "video", "audio"]
+_MEDIA_ASSET_ID = re.compile(r"^media-asset-[0-9a-f]{32}$")
 
 
 class WorkflowValidationError(ValueError):
@@ -44,6 +47,11 @@ class WorkflowBinding(BaseModel):
 
     @model_validator(mode="after")
     def validate_contract(self) -> WorkflowBinding:
+        if self.value_type == "image_asset":
+            if not self.required:
+                raise ValueError("Image asset bindings must be required.")
+            if self.default_value is not None:
+                raise ValueError("Image asset bindings cannot declare a default value.")
         if self.minimum is not None or self.maximum is not None:
             if self.value_type not in {"integer", "number"}:
                 raise ValueError("Only numeric bindings may declare minimum or maximum.")
@@ -62,7 +70,7 @@ class WorkflowBinding(BaseModel):
                 raise ValueError("Enum binding choices must be unique.")
         elif self.choices:
             raise ValueError("Only enum bindings may declare choices.")
-        if not self.required and self.default_value is None:
+        if self.value_type != "image_asset" and not self.required and self.default_value is None:
             raise ValueError("Optional bindings require a non-null default_value.")
         if self.default_value is not None:
             self.validate_value(self.default_value)
@@ -79,6 +87,8 @@ class WorkflowBinding(BaseModel):
                 valid = math.isfinite(value)
         elif self.value_type == "boolean":
             valid = isinstance(value, bool)
+        elif self.value_type == "image_asset":
+            valid = isinstance(value, str) and _MEDIA_ASSET_ID.fullmatch(value) is not None
         else:
             valid = any(value == choice and type(value) is type(choice) for choice in self.choices)
         if not valid:
@@ -97,16 +107,19 @@ class WorkflowRevision(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     id: str
     name: str
     digest: str
     created_at: datetime
     workflow: dict[str, dict[str, Any]]
     bindings: tuple[WorkflowBinding, ...] = ()
+    purpose: WorkflowPurpose = "general"
 
     @model_validator(mode="after")
     def validate_revision_integrity(self) -> WorkflowRevision:
+        if self.schema_version == 1 and self.purpose != "general":
+            raise ValueError("Legacy workflow revisions must use the general purpose.")
         expected = self._content_digest()
         if self.digest != expected or self.id != f"comfy-wf-{expected[:24]}":
             raise ValueError("Workflow revision digest does not match its content.")
@@ -122,6 +135,7 @@ class WorkflowRevision(BaseModel):
         bindings: tuple[WorkflowBinding, ...] | list[WorkflowBinding] = (),
         *,
         created_at: datetime | None = None,
+        purpose: WorkflowPurpose = "general",
     ) -> WorkflowRevision:
         if not name.strip():
             raise WorkflowValidationError("Workflow name cannot be empty.")
@@ -131,17 +145,21 @@ class WorkflowRevision(BaseModel):
         binding_tuple = tuple(bindings)
         _validate_bindings(normalized, binding_tuple)
         manifest = {
+            "schema_version": 2,
+            "purpose": purpose,
             "workflow": normalized,
             "bindings": [binding.model_dump(mode="json") for binding in binding_tuple],
         }
         digest = hashlib.sha256(_canonical_json(manifest).encode("utf-8")).hexdigest()
         return cls(
+            schema_version=2,
             id=f"comfy-wf-{digest[:24]}",
             name=name.strip(),
             digest=digest,
             created_at=created_at or datetime.now(UTC),
             workflow=deepcopy(normalized),
             bindings=binding_tuple,
+            purpose=purpose,
         )
 
     def render(self, values: Mapping[str, Any] | None = None) -> dict[str, dict[str, Any]]:
@@ -169,10 +187,18 @@ class WorkflowRevision(BaseModel):
         return rendered
 
     def _content_digest(self) -> str:
-        manifest = {
-            "workflow": self.workflow,
-            "bindings": [binding.model_dump(mode="json") for binding in self.bindings],
-        }
+        if self.schema_version == 1:
+            manifest = {
+                "workflow": self.workflow,
+                "bindings": [binding.model_dump(mode="json") for binding in self.bindings],
+            }
+        else:
+            manifest = {
+                "schema_version": self.schema_version,
+                "purpose": self.purpose,
+                "workflow": self.workflow,
+                "bindings": [binding.model_dump(mode="json") for binding in self.bindings],
+            }
         return hashlib.sha256(_canonical_json(manifest).encode("utf-8")).hexdigest()
 
 
@@ -320,6 +346,12 @@ def _validate_bindings(
             issues.append(
                 f"Binding {binding.id!r} targets missing input {binding.input_name!r} "
                 f"on node {binding.node_id!r}."
+            )
+        elif binding.value_type == "image_asset" and (
+            node.get("class_type") != "LoadImage" or binding.input_name != "image"
+        ):
+            issues.append(
+                f"Image asset binding {binding.id!r} must target a LoadImage.image input."
             )
     if issues:
         raise WorkflowValidationError(*issues)

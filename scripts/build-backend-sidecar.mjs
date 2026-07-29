@@ -6,7 +6,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -78,6 +78,33 @@ async function copyWithRetry(source, destination) {
     }
   }
   throw lastError;
+}
+
+// Single source of truth for which workflow definitions ship inside the frozen sidecar.
+// Only the curated defaults are runtime dependencies; bundling the whole examples
+// directory also shipped manual and deprecated graphs that nothing loads. The Python
+// tuple stays authoritative and this reads it, so the two cannot drift apart silently.
+export function curatedWorkflowFilenames(backendRoot) {
+  const defaultsPath = path.join(
+    backendRoot,
+    "src",
+    "project_master",
+    "integrations",
+    "comfyui",
+    "defaults.py",
+  );
+  const source = readFileSync(defaultsPath, "utf8");
+  const tuple = source.match(/_BUNDLED_FILENAMES\s*=\s*\(([\s\S]*?)\)/);
+  if (!tuple) {
+    throw new Error(`Could not read _BUNDLED_FILENAMES from ${defaultsPath}`);
+  }
+  const filenames = [...tuple[1].matchAll(/"([^"]+\.json)"/g)].map(
+    (match) => match[1],
+  );
+  if (filenames.length === 0) {
+    throw new Error(`_BUNDLED_FILENAMES listed no workflows in ${defaultsPath}`);
+  }
+  return filenames;
 }
 
 function capture(command, args, env) {
@@ -204,6 +231,15 @@ export async function buildBackendSidecar(argv = process.argv.slice(2)) {
       "voice",
       "chatterbox_worker.py",
     )}${path.delimiter}project_master_worker_data`,
+    ...curatedWorkflowFilenames(backendRoot).flatMap((filename) => [
+      "--add-data",
+      `${path.join(
+        backendRoot,
+        "examples",
+        "comfyui",
+        filename,
+      )}${path.delimiter}project_master_workflow_data`,
+    ]),
     "--distpath",
     distRoot,
     "--workpath",

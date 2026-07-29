@@ -24,9 +24,11 @@ from project_master.integrations.voice.engine import (
     RenderedAudio,
 )
 from project_master.integrations.voice.jobs import (
+    VOICE_RENDER_OWNER_PREFIX,
     InMemoryRenderJobRepository,
     RenderChunkStatus,
     RenderJob,
+    RenderJobNotFoundError,
     RenderJobRepository,
     RenderJobStatus,
 )
@@ -85,8 +87,15 @@ class VoiceStudioService:
     def list_profiles(self) -> tuple[VoiceProfile, ...]:
         return tuple(sorted(self._profiles.values(), key=lambda item: item.id))
 
-    def list_projects(self) -> tuple[VoiceProject, ...]:
-        return tuple(sorted(self._projects.values(), key=lambda item: item.id))
+    def list_projects(
+        self,
+        *,
+        include_internal: bool = False,
+    ) -> tuple[VoiceProject, ...]:
+        projects = self._projects.values()
+        if not include_internal:
+            projects = (item for item in projects if item.studio_visible)
+        return tuple(sorted(projects, key=lambda item: item.id))
 
     def list_packs(self) -> tuple[InstalledEnginePack, ...]:
         return tuple(sorted(self._packs.values(), key=lambda item: item.id))
@@ -122,10 +131,16 @@ class VoiceStudioService:
         engine_pack_id: str,
         purpose: RenderPurpose,
         settings: RenderSettings | None = None,
+        allow_internal: bool = False,
         now: datetime | None = None,
     ) -> RenderJob:
         timestamp = now or datetime.now(UTC)
         project = self._project(project_id)
+        if not allow_internal and not project.studio_visible:
+            raise VoiceStudioError(
+                f"Voice project {project.id!r} is internal and cannot be selected "
+                "in Voice Studio."
+            )
         pack = self._pack(engine_pack_id)
         adapter = self._adapter(pack)
         self._assert_project_authorized(project, pack, adapter, purpose, timestamp)
@@ -138,7 +153,7 @@ class VoiceStudioService:
             engine_max_characters=adapter.max_chunk_characters,
         )
         job = RenderJob.new(
-            job_id=f"voice-job-{uuid4().hex}",
+            job_id=f"{VOICE_RENDER_OWNER_PREFIX}{uuid4().hex}",
             project_id=project.id,
             project_digest=project.digest,
             engine_pack_id=pack.id,
@@ -146,15 +161,29 @@ class VoiceStudioService:
             purpose=purpose,
             settings=effective_settings,
             plans=plans,
+            origin=project.origin,
             now=timestamp,
         )
         return self.jobs.create(job)
 
-    def job_status(self, job_id: str) -> RenderJob:
-        return self.jobs.get(job_id)
-
-    async def run_job(self, job_id: str) -> RenderJob:
+    def job_status(
+        self,
+        job_id: str,
+        *,
+        include_internal: bool = False,
+    ) -> RenderJob:
         job = self.jobs.get(job_id)
+        self._assert_job_visible(job, include_internal=include_internal)
+        return job
+
+    async def run_job(
+        self,
+        job_id: str,
+        *,
+        allow_internal: bool = False,
+    ) -> RenderJob:
+        job = self.jobs.get(job_id)
+        self._assert_job_visible(job, include_internal=allow_internal)
         if job.status.terminal:
             return job
         if job.status == RenderJobStatus.CANCEL_REQUESTED:
@@ -186,9 +215,13 @@ class VoiceStudioService:
                 lease = await self._resource_leases.acquire(request, owner_id=job.id)
             except Exception as exc:
                 current = self.jobs.get(job.id)
+                # Report why the lease failed. The governor already explains
+                # which resource is busy; discarding that left an unactionable
+                # "Resource lease failed (RuntimeError)" in the UI.
+                reason = str(exc).strip() or type(exc).__name__
                 interrupted = current.transition(
                     RenderJobStatus.INTERRUPTED,
-                    error=f"Resource lease failed ({type(exc).__name__}).",
+                    error=f"Resource lease failed: {reason}",
                 )
                 return self.jobs.save(interrupted, expected_version=current.version)
 
@@ -317,8 +350,14 @@ class VoiceStudioService:
             if lease is not None:
                 await self._resource_leases.release(lease)
 
-    async def cancel_job(self, job_id: str) -> tuple[RenderJob, CancellationAck | None]:
+    async def cancel_job(
+        self,
+        job_id: str,
+        *,
+        allow_internal: bool = False,
+    ) -> tuple[RenderJob, CancellationAck | None]:
         job = self.jobs.get(job_id)
+        self._assert_job_visible(job, include_internal=allow_internal)
         if job.status.terminal:
             return job, None
         if job.status in {RenderJobStatus.PLANNED, RenderJobStatus.INTERRUPTED}:
@@ -386,6 +425,18 @@ class VoiceStudioService:
 
     def artifact(self, artifact_id: str) -> VoiceArtifact | None:
         return self.artifacts.get(artifact_id)
+
+    @staticmethod
+    def _assert_job_visible(
+        job: RenderJob,
+        *,
+        include_internal: bool,
+    ) -> None:
+        if include_internal or job.studio_visible:
+            return
+        raise RenderJobNotFoundError(
+            f"Voice render job {job.id!r} does not exist."
+        )
 
     def _apply_cache_hits(self, job: RenderJob) -> RenderJob:
         current = job

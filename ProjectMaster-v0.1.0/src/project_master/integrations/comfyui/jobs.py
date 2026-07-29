@@ -98,6 +98,34 @@ class JobConflictError(JobStateError):
     pass
 
 
+class ComfyInputImageProvenance(BaseModel):
+    """App-owned source identity retained without persisting media bytes or paths."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    binding_id: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    source_asset_id: str = Field(pattern=r"^media-asset-[0-9a-f]{32}$")
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_name: str = Field(min_length=1, max_length=255)
+
+    @field_validator("source_name")
+    @classmethod
+    def require_safe_source_name(cls, value: str) -> str:
+        if (
+            value != value.strip()
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError("ComfyUI input source name must be a safe file name.")
+        return value
+
+
 class ComfyJob(BaseModel):
     """Serializable state for one Project Master-owned ComfyUI prompt."""
 
@@ -108,6 +136,12 @@ class ComfyJob(BaseModel):
     profile_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     workflow_revision_id: str = Field(
         min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    )
+    project_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
     )
     client_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
     status: JobStatus = JobStatus.SUBMITTING
@@ -121,6 +155,7 @@ class ComfyJob(BaseModel):
     finished_at: datetime | None = None
     status_detail: str | None = Field(default=None, max_length=500)
     error: str | None = Field(default=None, max_length=1000)
+    input_images: tuple[ComfyInputImageProvenance, ...] = ()
     outputs: tuple[OutputMetadata, ...] = ()
     artifacts: tuple[ComfyArtifact, ...] = ()
     artifact_status: ArtifactStatus = ArtifactStatus.PENDING
@@ -150,6 +185,10 @@ class ComfyJob(BaseModel):
             raise ValueError("Non-terminal ComfyUI jobs cannot have finished_at.")
         if self.status == JobStatus.FAILED and not self.error:
             raise ValueError("Failed ComfyUI jobs require an error.")
+        if self.input_images and self.project_id is None:
+            raise ValueError("ComfyUI image inputs require a project association.")
+        if len({item.binding_id for item in self.input_images}) != len(self.input_images):
+            raise ValueError("ComfyUI image input bindings must be unique.")
         if self.status != JobStatus.SUCCEEDED and (
             self.artifacts
             or self.artifact_status != ArtifactStatus.PENDING
@@ -208,6 +247,8 @@ class ComfyJob(BaseModel):
         profile_id: str,
         workflow_revision_id: str,
         client_id: str,
+        project_id: str | None = None,
+        input_images: tuple[ComfyInputImageProvenance, ...] = (),
         now: datetime | None = None,
     ) -> ComfyJob:
         timestamp = now or datetime.now(UTC)
@@ -215,7 +256,9 @@ class ComfyJob(BaseModel):
             id=job_id,
             profile_id=profile_id,
             workflow_revision_id=workflow_revision_id,
+            project_id=project_id,
             client_id=client_id,
+            input_images=input_images,
             created_at=timestamp,
             updated_at=timestamp,
         )

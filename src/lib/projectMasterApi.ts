@@ -4,23 +4,38 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 export const API_BASE_URL = "http://127.0.0.1:8765/api/v1";
 export const API_UNREACHABLE_MESSAGE =
   "Project Master backend is not reachable at 127.0.0.1:8765 — is it running?";
+export const DEFAULT_UNCENSORED_CHAT_MODEL =
+  "hf.co/TrevorJS/gemma-4-E4B-it-uncensored-GGUF:Q4_K_M";
+export const DEFAULT_UNCENSORED_CHAT_MODEL_DIGEST =
+  "bafec5176449e6589e4d3183bb9586e6862fc1e3146ff62a2995ef1e0babdf48";
+export const DEFAULT_UNCENSORED_VISION_MODEL =
+  "lukey03/qwen3.5-9b-abliterated-vision:latest";
+export const DEFAULT_UNCENSORED_VISION_MODEL_DIGEST =
+  "b6ae7e073f77feef97010fd2e82a9480b400e48ea5afa035d9c86af0910650df";
 
 const STATUS_TIMEOUT_MS = 8_000;
 let desktopSessionToken: string | null = null;
 
 export interface ProjectMasterModel {
   name: string;
+  digest?: string;
+  automaticEligible?: boolean;
+  curatedPurposes?: string[];
   capabilities: string[];
   conversational: boolean;
   toolCapable: boolean;
 }
 
 export type ProjectMasterChatMode = "direct" | "team";
+export type MasterProjectType = "general" | "creator";
 
 export interface ProjectMasterTeamCatalogModel {
   physicalId: string;
   primaryTag: string;
   tags: string[];
+  digest?: string;
+  automaticEligible: boolean;
+  curatedPurposes: string[];
   capabilities: string[];
   sizeBytes: number;
 }
@@ -33,6 +48,15 @@ export interface ProjectMasterRunActivity {
   role?: string;
   tool?: string;
   ok?: boolean;
+  outcome?:
+    | "running"
+    | "success"
+    | "skipped"
+    | "unavailable"
+    | "blocked"
+    | "failed"
+    | "cancelled"
+    | "info";
   inputDetail?: string;
   outputDetail?: string;
 }
@@ -41,10 +65,45 @@ export interface MasterProject {
   id: string;
   name: string;
   description: string;
+  projectType: MasterProjectType;
   status: string;
   rootPath?: string;
   allowDreaming: boolean;
   updatedAt: string;
+}
+
+export type MediaAssetKind = "image" | "video" | "audio";
+
+export interface MediaHealth {
+  available: boolean;
+  maxUploadBytes?: number;
+  supportedMediaTypes: string[];
+  ffmpegAvailable?: boolean;
+  ffprobeAvailable?: boolean;
+}
+
+export interface MediaAssetDerivation {
+  operation: "video_trim";
+  sourceAssetId: string;
+  startSeconds: number;
+  endSeconds: number;
+  recipe: "mp4-h264-aac-v1";
+}
+
+export interface MediaAssetSummary {
+  id: string;
+  projectIds: string[];
+  name: string;
+  kind: MediaAssetKind;
+  source: string;
+  mediaType: string;
+  sha256: string;
+  sizeBytes: number;
+  durationSeconds?: number;
+  width?: number;
+  height?: number;
+  derivation?: MediaAssetDerivation;
+  createdAt: string;
 }
 
 export interface MasterRun {
@@ -120,6 +179,7 @@ export interface DreamRecipeSummary {
 export interface DreamRunSummary {
   runId: string;
   recipeId: string;
+  windowKey: string;
   status: string;
   createdAt: string;
   itemId?: string;
@@ -183,7 +243,18 @@ export interface ComfyProfileSummary {
   name: string;
   baseUrl: string;
   verifyTls: boolean;
+  trustedHosts: string[];
 }
+
+export interface ComfyProfileStatus {
+  profileId: string;
+  ok: boolean;
+  deviceCount: number;
+  objectTypeCount: number;
+  error?: string;
+}
+
+export type ComfyWorkflowPurpose = "general" | "image" | "video" | "audio";
 
 export interface ComfyWorkflowSummary {
   id: string;
@@ -191,7 +262,24 @@ export interface ComfyWorkflowSummary {
   digest: string;
   trustState: string;
   createdAt: string;
+  purpose: ComfyWorkflowPurpose;
+  curatedDefault: boolean;
   bindings: ComfyWorkflowBinding[];
+}
+
+export interface ComfyWorkflowCompatibility {
+  profileId: string;
+  workflowRevisionId: string;
+  compatible: boolean;
+  missingNodeTypes: string[];
+  missingResources: ComfyMissingResource[];
+}
+
+export interface ComfyMissingResource {
+  nodeId: string;
+  classType: string;
+  inputName: string;
+  resourceName: string;
 }
 
 export type ComfyBindingType =
@@ -199,7 +287,8 @@ export type ComfyBindingType =
   | "integer"
   | "number"
   | "boolean"
-  | "enum";
+  | "enum"
+  | "image_asset";
 
 export interface ComfyWorkflowBinding {
   id: string;
@@ -218,6 +307,7 @@ export interface ComfyJobSummary {
   id: string;
   profileId: string;
   workflowRevisionId: string;
+  projectId?: string;
   status: string;
   createdAt: string;
   artifactStatus: "pending" | "ready" | "partial" | "failed" | "unavailable";
@@ -365,6 +455,7 @@ export interface ProjectMasterCommunicationProfile {
 
 interface ModelStatus {
   configured_model: string;
+  recommended_model?: string | null;
   num_ctx: number;
   ollama_reachable: boolean;
   models: string[];
@@ -377,6 +468,8 @@ export interface StreamChatOptions {
   message: string;
   mode: ProjectMasterChatMode;
   allowMutations: boolean;
+  allowWebSearch: boolean;
+  imageAssetIds?: string[];
   projectId?: string;
   conversationId?: string;
   signal: AbortSignal;
@@ -514,6 +607,7 @@ async function ensureSuccess(response: Response): Promise<void> {
 export async function getModelStatus(signal?: AbortSignal): Promise<{
   models: ProjectMasterModel[];
   configuredModel: string;
+  recommendedModel: string | null;
   contextLength: number;
   ollamaReachable: boolean;
   teamCatalog: ProjectMasterTeamCatalogModel[];
@@ -530,6 +624,15 @@ export async function getModelStatus(signal?: AbortSignal): Promise<{
     if (!Array.isArray(status.models) || typeof status.configured_model !== "string") {
       throw new ProjectMasterProtocolError("Project Master returned an invalid model status.");
     }
+    if (
+      status.recommended_model !== undefined &&
+      status.recommended_model !== null &&
+      typeof status.recommended_model !== "string"
+    ) {
+      throw new ProjectMasterProtocolError(
+        "Project Master returned an invalid model recommendation.",
+      );
+    }
     const teamCatalog = parseTeamCatalog(status.catalog);
     const modelCatalog = new Map(
       teamCatalog.flatMap((item) =>
@@ -541,6 +644,9 @@ export async function getModelStatus(signal?: AbortSignal): Promise<{
       const capabilities = catalogModel?.capabilities ?? [];
       return {
         name,
+        digest: catalogModel?.digest,
+        automaticEligible: catalogModel?.automaticEligible ?? false,
+        curatedPurposes: catalogModel?.curatedPurposes ?? [],
         capabilities,
         conversational: supportsConversationalCompletion(capabilities),
         toolCapable: capabilities.some((item) =>
@@ -551,11 +657,18 @@ export async function getModelStatus(signal?: AbortSignal): Promise<{
     return {
       models,
       configuredModel: status.configured_model,
+      recommendedModel:
+        status.recommended_model === undefined
+          ? status.configured_model || null
+          : status.recommended_model?.trim() || null,
       contextLength: status.num_ctx,
       ollamaReachable: status.ollama_reachable,
       teamCatalog,
-      teamAvailable: teamCatalog.some((item) =>
-        supportsConversationalCompletion(item.capabilities),
+      teamAvailable: teamCatalog.some(
+        (item) =>
+          item.automaticEligible &&
+          item.curatedPurposes.includes("team") &&
+          supportsConversationalCompletion(item.capabilities),
       ),
     };
   } catch (error) {
@@ -566,6 +679,103 @@ export async function getModelStatus(signal?: AbortSignal): Promise<{
     globalThis.clearTimeout(timeout);
     signal?.removeEventListener("abort", forwardAbort);
   }
+}
+
+export function resolveModelSelection(
+  models: ProjectMasterModel[],
+  currentModel: string,
+  recommendedModel: string | null,
+): string {
+  const conversationalModels = models.filter((model) => model.conversational);
+  const current = conversationalModels.find((model) => model.name === currentModel);
+  if (current) return current.name;
+  if (!recommendedModel) return "";
+  const expected = recommendedModel.toLocaleLowerCase();
+  const recommended = conversationalModels.find(
+    (model) => model.name.toLocaleLowerCase() === expected,
+  );
+  return recommended && isCuratedUncensoredChatModel(recommended)
+    ? recommended.name
+    : "";
+}
+
+export function isVisionCapableModel(model: ProjectMasterModel): boolean {
+  return (
+    model.conversational &&
+    model.capabilities.some(
+      (capability) => capability.toLocaleLowerCase() === "vision",
+    )
+  );
+}
+
+function exactModelIdentity(
+  model: ProjectMasterModel,
+  expectedTag: string,
+  expectedDigest: string,
+): boolean {
+  return (
+    model.name.toLocaleLowerCase() === expectedTag.toLocaleLowerCase() &&
+    model.digest?.toLocaleLowerCase() === expectedDigest.toLocaleLowerCase()
+  );
+}
+
+export function isCuratedUncensoredChatModel(
+  model: ProjectMasterModel,
+): boolean {
+  return (
+    model.curatedPurposes?.includes("chat") === true &&
+    (exactModelIdentity(
+      model,
+      DEFAULT_UNCENSORED_CHAT_MODEL,
+      DEFAULT_UNCENSORED_CHAT_MODEL_DIGEST,
+    ) ||
+      exactModelIdentity(
+        model,
+        DEFAULT_UNCENSORED_VISION_MODEL,
+        DEFAULT_UNCENSORED_VISION_MODEL_DIGEST,
+      ))
+  );
+}
+
+export function isCuratedUncensoredVisionModel(
+  model: ProjectMasterModel,
+): boolean {
+  return (
+    isVisionCapableModel(model) &&
+    model.curatedPurposes?.includes("vision") === true &&
+    exactModelIdentity(
+      model,
+      DEFAULT_UNCENSORED_VISION_MODEL,
+      DEFAULT_UNCENSORED_VISION_MODEL_DIGEST,
+    )
+  );
+}
+
+export function isCuratedTeamModel(model: ProjectMasterModel): boolean {
+  return (
+    model.automaticEligible === true &&
+    model.curatedPurposes?.includes("team") === true &&
+    model.conversational
+  );
+}
+
+export function resolveVisionModelSelection(
+  models: ProjectMasterModel[],
+  preferredModel: string,
+): string {
+  const visionModels = models.filter(isVisionCapableModel);
+  const findInstalled = (tag: string) => {
+    const expected = tag.trim().toLocaleLowerCase();
+    if (!expected) return undefined;
+    return visionModels.find(
+      (model) => model.name.toLocaleLowerCase() === expected,
+    );
+  };
+  return (
+    findInstalled(preferredModel)?.name ??
+    visionModels.find(isCuratedUncensoredVisionModel)?.name ??
+    ""
+  );
 }
 
 function supportsConversationalCompletion(capabilities: string[]): boolean {
@@ -591,6 +801,15 @@ function parseTeamCatalog(payload: unknown): ProjectMasterTeamCatalogModel[] {
       !("tags" in model) ||
       !Array.isArray(model.tags) ||
       !model.tags.every((tag: unknown) => typeof tag === "string") ||
+      !("digest" in model) ||
+      (model.digest !== null && typeof model.digest !== "string") ||
+      ("automatic_eligible" in model &&
+        typeof model.automatic_eligible !== "boolean") ||
+      ("curated_purposes" in model &&
+        (!Array.isArray(model.curated_purposes) ||
+          !model.curated_purposes.every(
+            (purpose: unknown) => typeof purpose === "string",
+          ))) ||
       !("capabilities" in model) ||
       !Array.isArray(model.capabilities) ||
       !model.capabilities.every(
@@ -607,6 +826,15 @@ function parseTeamCatalog(payload: unknown): ProjectMasterTeamCatalogModel[] {
       physicalId: model.physical_id,
       primaryTag: model.primary_tag,
       tags: model.tags,
+      digest:
+        typeof model.digest === "string" ? model.digest : undefined,
+      automaticEligible:
+        "automatic_eligible" in model && model.automatic_eligible === true,
+      curatedPurposes:
+        "curated_purposes" in model &&
+        Array.isArray(model.curated_purposes)
+          ? model.curated_purposes
+          : [],
       capabilities: model.capabilities,
       sizeBytes: model.size_bytes,
     };
@@ -791,10 +1019,17 @@ function parseProject(value: unknown): MasterProject {
     !Array.isArray(item.metadata)
       ? (item.metadata as JsonRecord)
       : {};
+  const projectType = stringField(item, "project_type", "project", "general");
+  if (projectType !== "general" && projectType !== "creator") {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned an invalid project type.",
+    );
+  }
   return {
     id: stringField(item, "id", "project"),
     name: stringField(item, "name", "project"),
     description: stringField(item, "description", "project"),
+    projectType,
     status: stringField(item, "status", "project"),
     rootPath: stringField(item, "root_path", "project") || undefined,
     allowDreaming: metadata.allow_dreaming === true,
@@ -829,9 +1064,15 @@ function parseRunEvent(value: unknown): MasterRunEvent {
   };
 }
 
-export async function listProjects(signal?: AbortSignal): Promise<MasterProject[]> {
+export async function listProjects(
+  signal?: AbortSignal,
+  projectType?: MasterProjectType,
+): Promise<MasterProject[]> {
+  const query = projectType
+    ? `?project_type=${encodeURIComponent(projectType)}`
+    : "";
   const payload = record(
-    await jsonRequest("/projects", { signal }),
+    await jsonRequest(`/projects${query}`, { signal }),
     "project list",
   );
   return arrayField(payload, "projects", "project list").map(parseProject);
@@ -841,6 +1082,7 @@ export async function createProject(input: {
   name: string;
   description: string;
   rootPath?: string;
+  projectType?: MasterProjectType;
 }): Promise<MasterProject> {
   return parseProject(
     await jsonRequest(
@@ -849,9 +1091,266 @@ export async function createProject(input: {
         name: input.name,
         description: input.description,
         root_path: input.rootPath || null,
+        project_type: input.projectType ?? "general",
       }),
     ),
   );
+}
+
+function optionalNumberField(
+  value: JsonRecord,
+  key: string,
+  label: string,
+): number | undefined {
+  const field = value[key];
+  if (field === undefined || field === null) return undefined;
+  if (typeof field !== "number" || !Number.isFinite(field)) {
+    throw new ProjectMasterProtocolError(`Project Master returned invalid ${label}.`);
+  }
+  return field;
+}
+
+function parseMediaAsset(value: unknown): MediaAssetSummary {
+  const item = record(value, "media asset");
+  const kind = stringField(item, "kind", "media asset");
+  if (!["image", "video", "audio"].includes(kind)) {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned an invalid media asset kind.",
+    );
+  }
+  const projectIds = arrayField(item, "project_ids", "media asset");
+  if (!projectIds.every((projectId) => typeof projectId === "string")) {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned invalid media asset project IDs.",
+    );
+  }
+  const sha256 = stringField(item, "sha256", "media asset");
+  if (!/^[a-f0-9]{64}$/i.test(sha256)) {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned an invalid media asset checksum.",
+    );
+  }
+  const sizeBytes = numberField(item, "size_bytes", "media asset");
+  const durationSeconds = optionalNumberField(
+    item,
+    "duration_seconds",
+    "media asset",
+  );
+  const width = optionalNumberField(item, "width", "media asset");
+  const height = optionalNumberField(item, "height", "media asset");
+  if (
+    !Number.isInteger(sizeBytes) ||
+    sizeBytes <= 0 ||
+    (durationSeconds !== undefined && durationSeconds < 0) ||
+    (width !== undefined && (!Number.isInteger(width) || width <= 0)) ||
+    (height !== undefined && (!Number.isInteger(height) || height <= 0))
+  ) {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned invalid media asset dimensions.",
+    );
+  }
+  let derivation: MediaAssetDerivation | undefined;
+  if (item.derivation !== undefined && item.derivation !== null) {
+    const rawDerivation = record(item.derivation, "media asset derivation");
+    const operation = stringField(
+      rawDerivation,
+      "operation",
+      "media asset derivation",
+    );
+    const sourceAssetId = stringField(
+      rawDerivation,
+      "source_asset_id",
+      "media asset derivation",
+    );
+    const startSeconds = numberField(
+      rawDerivation,
+      "start_seconds",
+      "media asset derivation",
+    );
+    const endSeconds = numberField(
+      rawDerivation,
+      "end_seconds",
+      "media asset derivation",
+    );
+    const recipe = stringField(
+      rawDerivation,
+      "recipe",
+      "media asset derivation",
+    );
+    if (
+      operation !== "video_trim" ||
+      recipe !== "mp4-h264-aac-v1" ||
+      !sourceAssetId ||
+      startSeconds < 0 ||
+      endSeconds <= startSeconds
+    ) {
+      throw new ProjectMasterProtocolError(
+        "Project Master returned an invalid media asset derivation.",
+      );
+    }
+    derivation = {
+      operation,
+      sourceAssetId,
+      startSeconds,
+      endSeconds,
+      recipe,
+    };
+  }
+  return {
+    id: stringField(item, "id", "media asset"),
+    projectIds,
+    name: stringField(item, "name", "media asset"),
+    kind: kind as MediaAssetKind,
+    source: stringField(item, "source", "media asset"),
+    mediaType: stringField(item, "media_type", "media asset"),
+    sha256,
+    sizeBytes,
+    durationSeconds,
+    width,
+    height,
+    derivation,
+    createdAt: stringField(item, "created_at", "media asset"),
+  };
+}
+
+export async function getMediaHealth(
+  signal?: AbortSignal,
+): Promise<MediaHealth> {
+  const payload = record(
+    await jsonRequest("/media/health", { signal }),
+    "media health",
+  );
+  const rawTypes = payload.supported_media_types;
+  const rawKinds = payload.supported_kinds;
+  const supportedKinds =
+    rawKinds === undefined
+      ? undefined
+      : Array.isArray(rawKinds) &&
+          rawKinds.every(
+            (kind) =>
+              typeof kind === "string" &&
+              ["image", "video", "audio"].includes(kind),
+          )
+        ? rawKinds
+        : null;
+  if (supportedKinds === null) {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned invalid media health.",
+    );
+  }
+  const supportedMediaTypes =
+    rawTypes === undefined
+      ? supportedKinds?.map((kind) => `${kind}/*`) ??
+        ["image/*", "audio/*", "video/*"]
+      : Array.isArray(rawTypes) &&
+          rawTypes.every((mediaType) => typeof mediaType === "string")
+        ? rawTypes
+        : null;
+  if (supportedMediaTypes === null) {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned invalid media health.",
+    );
+  }
+  const maxUploadBytes = optionalNumberField(
+    payload,
+    "max_upload_bytes",
+    "media health",
+  );
+  if (
+    maxUploadBytes !== undefined &&
+    (!Number.isInteger(maxUploadBytes) || maxUploadBytes <= 0)
+  ) {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned invalid media health.",
+    );
+  }
+  return {
+    available: payload.available === true || payload.ok === true,
+    maxUploadBytes,
+    supportedMediaTypes,
+    ffmpegAvailable:
+      typeof payload.ffmpeg_available === "boolean"
+        ? payload.ffmpeg_available
+        : undefined,
+    ffprobeAvailable:
+      typeof payload.ffprobe_available === "boolean"
+        ? payload.ffprobe_available
+        : undefined,
+  };
+}
+
+export async function listProjectMediaAssets(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<MediaAssetSummary[]> {
+  const payload = record(
+    await jsonRequest(
+      `/projects/${encodeURIComponent(projectId)}/media`,
+      { signal },
+    ),
+    "media asset list",
+  );
+  return arrayField(payload, "assets", "media asset list").map(parseMediaAsset);
+}
+
+export async function importProjectMediaAsset(
+  projectId: string,
+  file: File,
+  signal?: AbortSignal,
+): Promise<MediaAssetSummary> {
+  const response = await request(
+    `/projects/${encodeURIComponent(projectId)}/media?file_name=${encodeURIComponent(file.name)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+      },
+      body: file,
+      signal,
+    },
+  );
+  await ensureSuccess(response);
+  const payload = record(await response.json(), "media import");
+  return parseMediaAsset(payload.asset);
+}
+
+export async function getMediaAssetContent(
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const response = await request(
+    `/media/assets/${encodeURIComponent(assetId)}/content`,
+    { signal },
+  );
+  await ensureSuccess(response);
+  return response.blob();
+}
+
+export async function trimProjectVideo(
+  projectId: string,
+  assetId: string,
+  input: {
+    startSeconds: number;
+    endSeconds: number;
+    outputName?: string;
+  },
+  signal?: AbortSignal,
+): Promise<MediaAssetSummary> {
+  const payload = record(
+    await jsonRequest(
+      `/projects/${encodeURIComponent(projectId)}/media/${encodeURIComponent(assetId)}/trim`,
+      {
+        ...jsonPost({
+          start_seconds: input.startSeconds,
+          end_seconds: input.endSeconds,
+          output_name: input.outputName || undefined,
+        }),
+        signal,
+      },
+    ),
+    "video trim",
+  );
+  return parseMediaAsset(payload.asset);
 }
 
 export async function setProjectDreaming(
@@ -1084,6 +1583,7 @@ function parseDreamRun(value: unknown): DreamRunSummary {
   return {
     runId: stringField(item, "run_id", "Dream run"),
     recipeId: stringField(item, "recipe_id", "Dream run"),
+    windowKey: stringField(item, "window_key", "Dream run"),
     status: stringField(item, "status", "Dream run"),
     createdAt: stringField(item, "created_at_utc", "Dream run"),
     itemId: stringField(item, "item_id", "Dream run") || undefined,
@@ -1308,11 +1808,13 @@ export async function runManualDream(input: {
   sourceId: string;
   locator: string;
   content: string;
+  requestId?: string;
 }): Promise<void> {
   await jsonRequest(
     "/dreams/runs/manual",
     jsonPost({
       recipe_id: input.recipeId,
+      request_id: input.requestId,
       sources: [
         {
           source_id: input.sourceId,
@@ -1347,12 +1849,19 @@ function parseComfyProfile(value: unknown): ComfyProfileSummary {
     name: stringField(item, "name", "ComfyUI profile"),
     baseUrl: stringField(item, "base_url", "ComfyUI profile"),
     verifyTls: item.verify_tls !== false,
+    trustedHosts: stringArray(item.trusted_hosts),
   };
 }
 
 function parseComfyWorkflow(value: unknown): ComfyWorkflowSummary {
   const stored = record(value, "ComfyUI workflow");
   const revision = record(stored.revision, "ComfyUI workflow revision");
+  const purpose = stringField(revision, "purpose", "ComfyUI workflow");
+  if (!["general", "image", "video", "audio"].includes(purpose)) {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned an invalid ComfyUI workflow purpose.",
+    );
+  }
   const bindings = arrayField(revision, "bindings", "ComfyUI workflow").map(
     (raw): ComfyWorkflowBinding => {
       const binding = record(raw, "ComfyUI workflow binding");
@@ -1362,7 +1871,14 @@ function parseComfyWorkflow(value: unknown): ComfyWorkflowSummary {
         "ComfyUI workflow binding",
       );
       if (
-        !["string", "integer", "number", "boolean", "enum"].includes(valueType)
+        ![
+          "string",
+          "integer",
+          "number",
+          "boolean",
+          "enum",
+          "image_asset",
+        ].includes(valueType)
       ) {
         throw new ProjectMasterProtocolError(
           "Project Master returned invalid ComfyUI workflow binding.",
@@ -1411,6 +1927,8 @@ function parseComfyWorkflow(value: unknown): ComfyWorkflowSummary {
     digest: stringField(revision, "digest", "ComfyUI workflow"),
     trustState: stringField(stored, "trust_state", "ComfyUI workflow"),
     createdAt: stringField(revision, "created_at", "ComfyUI workflow"),
+    purpose: purpose as ComfyWorkflowPurpose,
+    curatedDefault: stored.curated_default === true,
     bindings,
   };
 }
@@ -1435,6 +1953,7 @@ function parseComfyJob(value: unknown): ComfyJobSummary {
     id: stringField(item, "id", "ComfyUI job"),
     profileId: stringField(item, "profile_id", "ComfyUI job"),
     workflowRevisionId: stringField(item, "workflow_revision_id", "ComfyUI job"),
+    projectId: stringField(item, "project_id", "ComfyUI job") || undefined,
     status: stringField(item, "status", "ComfyUI job"),
     createdAt: stringField(item, "created_at", "ComfyUI job"),
     artifactStatus: artifactStatus as ComfyJobSummary["artifactStatus"],
@@ -1533,10 +2052,9 @@ export async function saveComfyProfile(input: {
   );
 }
 
-export async function getComfyProfileStatus(profileId: string): Promise<{
-  ok: boolean;
-  error?: string;
-}> {
+export async function getComfyProfileStatus(
+  profileId: string,
+): Promise<ComfyProfileStatus> {
   const payload = record(
     await jsonRequest(
       `/integrations/comfyui/profiles/${encodeURIComponent(profileId)}/status`,
@@ -1544,7 +2062,15 @@ export async function getComfyProfileStatus(profileId: string): Promise<{
     "ComfyUI status",
   );
   return {
+    profileId:
+      stringField(payload, "profile_id", "ComfyUI status") || profileId,
     ok: payload.ok === true,
+    deviceCount: numberField(payload, "device_count", "ComfyUI status"),
+    objectTypeCount: numberField(
+      payload,
+      "object_type_count",
+      "ComfyUI status",
+    ),
     error: stringField(payload, "error", "ComfyUI status") || undefined,
   };
 }
@@ -1553,12 +2079,14 @@ export async function importComfyWorkflow(
   name: string,
   workflow: JsonRecord,
   bindings: ComfyWorkflowBinding[] = [],
+  purpose: ComfyWorkflowPurpose = "general",
 ): Promise<ComfyWorkflowSummary> {
   return parseComfyWorkflow(
     await jsonRequest(
       "/integrations/comfyui/workflows",
       jsonPost({
         name,
+        purpose,
         workflow,
         bindings: bindings.map((binding) => ({
           id: binding.id,
@@ -1577,6 +2105,68 @@ export async function importComfyWorkflow(
   );
 }
 
+export async function getComfyWorkflowCompatibility(
+  profileId: string,
+  workflowRevisionId: string,
+  signal?: AbortSignal,
+): Promise<ComfyWorkflowCompatibility> {
+  const payload = record(
+    await jsonRequest(
+      `/integrations/comfyui/workflows/${encodeURIComponent(workflowRevisionId)}/compatibility/${encodeURIComponent(profileId)}`,
+      { signal },
+    ),
+    "ComfyUI workflow compatibility",
+  );
+  if (typeof payload.compatible !== "boolean") {
+    throw new ProjectMasterProtocolError(
+      "Project Master returned invalid ComfyUI workflow compatibility.",
+    );
+  }
+  const missingResources =
+    payload.missing_resources === undefined
+      ? []
+      : arrayField(
+          payload,
+          "missing_resources",
+          "ComfyUI workflow compatibility",
+        ).map((value) => {
+          const item = record(value, "ComfyUI missing resource");
+          return {
+            nodeId: stringField(item, "node_id", "ComfyUI missing resource"),
+            classType: stringField(
+              item,
+              "class_type",
+              "ComfyUI missing resource",
+            ),
+            inputName: stringField(
+              item,
+              "input_name",
+              "ComfyUI missing resource",
+            ),
+            resourceName: stringField(
+              item,
+              "resource_name",
+              "ComfyUI missing resource",
+            ),
+          };
+        });
+  return {
+    profileId: stringField(
+      payload,
+      "profile_id",
+      "ComfyUI workflow compatibility",
+    ),
+    workflowRevisionId: stringField(
+      payload,
+      "workflow_revision_id",
+      "ComfyUI workflow compatibility",
+    ),
+    compatible: payload.compatible,
+    missingNodeTypes: stringArray(payload.missing_node_types),
+    missingResources,
+  };
+}
+
 export async function decideComfyWorkflow(
   revisionId: string,
   trustState: "approved" | "rejected",
@@ -1591,15 +2181,31 @@ export async function decideComfyWorkflow(
 export async function createComfyJob(input: {
   profileId: string;
   workflowRevisionId: string;
+  projectId?: string;
   values?: Record<string, unknown>;
-}): Promise<void> {
-  await jsonRequest(
-    "/integrations/comfyui/jobs",
-    jsonPost({
-      profile_id: input.profileId,
-      workflow_revision_id: input.workflowRevisionId,
-      values: input.values ?? {},
-    }),
+}): Promise<ComfyJobSummary> {
+  return parseComfyJob(
+    await jsonRequest(
+      "/integrations/comfyui/jobs",
+      jsonPost({
+        profile_id: input.profileId,
+        workflow_revision_id: input.workflowRevisionId,
+        project_id: input.projectId ?? null,
+        values: input.values ?? {},
+      }),
+    ),
+  );
+}
+
+export async function refreshComfyJob(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<ComfyJobSummary> {
+  return parseComfyJob(
+    await jsonRequest(
+      `/integrations/comfyui/jobs/${encodeURIComponent(jobId)}/refresh`,
+      { ...jsonPost({}), signal },
+    ),
   );
 }
 
@@ -1613,9 +2219,11 @@ export async function cancelComfyJob(jobId: string): Promise<void> {
 export async function getComfyArtifactContent(
   jobId: string,
   artifactId: string,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   const response = await request(
     `/integrations/comfyui/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}/content`,
+    { signal },
   );
   await ensureSuccess(response);
   return response.blob();
@@ -1778,10 +2386,11 @@ export async function importVoiceReference(
   file: VoiceReferenceFile,
   transcript?: string,
 ): Promise<VoiceReferenceSummary> {
-  if (
-    !file.name.toLowerCase().endsWith(".wav") ||
-    (file.type && !["audio/wav", "audio/x-wav", "audio/wave"].includes(file.type))
-  ) {
+  // Only the extension is checked here. Reported MIME types for .wav vary by
+  // platform (Linux shared-mime-info reports audio/vnd.wave, others report
+  // audio/x-wav or nothing at all), so sniffing it rejects valid files. The
+  // backend parses the actual RIFF/WAVE header and is the real authority.
+  if (!file.name.toLowerCase().endsWith(".wav")) {
     throw new Error("Voice references must be local WAV files.");
   }
   if (file.size < 44 || file.size > 67_000_000) {
@@ -1902,12 +2511,46 @@ export async function cancelVoiceJob(jobId: string): Promise<void> {
   await jsonRequest(`/voice/jobs/${encodeURIComponent(jobId)}/cancel`, jsonPost({}));
 }
 
-export async function getVoiceArtifactContent(artifactId: string): Promise<Blob> {
+export async function getVoiceArtifactContent(
+  artifactId: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
   const response = await request(
     `/voice/artifacts/${encodeURIComponent(artifactId)}/content`,
+    { signal },
   );
   await ensureSuccess(response);
   return response.blob();
+}
+
+export interface SpokenMessage {
+  /** One entry per rendered chunk, in playback order. */
+  artifactIds: string[];
+  durationSeconds: number | null;
+}
+
+export async function speakMessage(
+  text: string,
+  profileId: string,
+  signal?: AbortSignal,
+): Promise<SpokenMessage> {
+  const payload = record(
+    await jsonRequest(
+      "/voice/speak",
+      { ...jsonPost({ text, profile_id: profileId }), signal },
+    ),
+    "spoken message",
+  );
+  // Messages past the chunk limit render as several artifacts; playing only the
+  // first one cuts the message off partway through.
+  const artifactIds = stringArray(payload.artifact_ids);
+  const duration = payload.duration_seconds;
+  return {
+    artifactIds: artifactIds.length
+      ? artifactIds
+      : [stringField(payload, "artifact_id", "spoken message")],
+    durationSeconds: typeof duration === "number" ? duration : null,
+  };
 }
 
 function parseEvent(line: string, options: StreamChatOptions): boolean {
@@ -1939,6 +2582,14 @@ function parseEvent(line: string, options: StreamChatOptions): boolean {
     throw new Error(typeof event.error === "string" ? event.error : "Backend stream failed.");
   }
   if (event.type === "cancelled") throw createAbortError();
+  if (event.type === "done" && options.mode === "team") {
+    options.onActivity?.({
+      kind: "delivery_completed",
+      message: "MASTER delivered the final response",
+      runId: typeof event.run_id === "string" ? event.run_id : undefined,
+      outcome: "success",
+    });
+  }
   return event.type === "done";
 }
 
@@ -1968,7 +2619,91 @@ function parseTeamActivity(
     runId: typeof runId === "string" ? runId : undefined,
     model,
     role,
+    outcome: teamActivityOutcome(kind),
   };
+}
+
+function teamActivityOutcome(
+  kind: string,
+): NonNullable<ProjectMasterRunActivity["outcome"]> {
+  if (kind.includes("failed")) return "failed";
+  if (kind.includes("cancelled")) return "cancelled";
+  if (kind.includes("skipped")) return "skipped";
+  if (kind.includes("completed") || kind === "delivery") return "success";
+  if (kind.includes("started")) return "running";
+  return "info";
+}
+
+function structuredToolResult(result: unknown): JsonRecord | null {
+  if (typeof result === "object" && result !== null && !Array.isArray(result)) {
+    return result as JsonRecord;
+  }
+  if (typeof result !== "string") return null;
+  try {
+    const parsed = JSON.parse(result) as unknown;
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+      ? (parsed as JsonRecord)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function toolOutcome(
+  ok: boolean | undefined,
+  result: unknown,
+): NonNullable<ProjectMasterRunActivity["outcome"]> {
+  if (ok !== false) return "success";
+  const structured = structuredToolResult(result);
+  const code = String(structured?.error ?? "").toLocaleLowerCase();
+  const message = String(structured?.message ?? result ?? "").toLocaleLowerCase();
+  if (
+    code === "duplicate_tool_call_suppressed" ||
+    message.includes("duplicate") && message.includes("suppress")
+  ) {
+    return "skipped";
+  }
+  if (
+    code === "permissionerror" ||
+    message.includes("requires explicit authorization") ||
+    message.includes("permission denied")
+  ) {
+    return "blocked";
+  }
+  if (
+    code.includes("unavailable") ||
+    message.includes("not installed") ||
+    message.includes("not configured") ||
+    message.includes("unavailable") ||
+    message.includes("unreachable")
+  ) {
+    return "unavailable";
+  }
+  if (message.includes("cancelled") || message.includes("canceled")) {
+    return "cancelled";
+  }
+  return "failed";
+}
+
+function outcomeVerb(
+  outcome: NonNullable<ProjectMasterRunActivity["outcome"]>,
+): string {
+  switch (outcome) {
+    case "skipped":
+      return "skipped";
+    case "unavailable":
+      return "unavailable";
+    case "blocked":
+      return "blocked";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "failed";
+    default:
+      return "completed";
+  }
 }
 
 function parseToolActivity(
@@ -1982,19 +2717,22 @@ function parseToolActivity(
   const ok = "ok" in payload && typeof payload.ok === "boolean"
     ? payload.ok
     : undefined;
+  const result = "result" in payload ? payload.result : undefined;
+  const outcome = toolOutcome(ok, result);
   return {
-    kind: ok === false ? "tool_failed" : "tool_completed",
-    message: `${tool} ${ok === false ? "failed" : "completed"}`,
+    kind: `tool_${outcomeVerb(outcome)}`,
+    message: `${tool} ${outcomeVerb(outcome)}`,
     runId: typeof runId === "string" ? runId : undefined,
     tool,
     ok,
+    outcome,
     inputDetail:
       "arguments" in payload
         ? formatToolDetail(payload.arguments, "No structured input")
         : undefined,
     outputDetail:
-      "result" in payload
-        ? formatToolDetail(payload.result, "No output")
+      result !== undefined
+        ? formatToolDetail(result, "No output")
         : undefined,
   };
 }
@@ -2070,6 +2808,8 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
       model: options.model,
       mode: options.mode,
       allow_mutations: options.allowMutations,
+      allow_web_search: options.allowWebSearch,
+      image_asset_ids: options.imageAssetIds ?? [],
       project_id: options.projectId,
     }),
     signal: options.signal,

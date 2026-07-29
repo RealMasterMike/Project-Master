@@ -30,7 +30,7 @@ class FakeProvider:
     def __init__(
         self,
         model: str,
-        behavior: ProviderBehavior,
+        behavior: ProviderBehavior | list[ProviderBehavior],
         calls: list[dict[str, Any]],
     ) -> None:
         self.model = model
@@ -43,6 +43,11 @@ class FakeProvider:
         tools: list[dict[str, object]] | None = None,
         cancellation: CancellationToken | None = None,
     ) -> Iterator[Message]:
+        behavior = self.behavior
+        if isinstance(behavior, list):
+            # Sequenced behaviors are shared through the behaviors dict, so
+            # popping here advances the sequence across provider instances.
+            behavior = behavior.pop(0) if len(behavior) > 1 else behavior[0]
         self.calls.append(
             {
                 "model": self.model,
@@ -50,11 +55,11 @@ class FakeProvider:
                 "tools": tools,
             }
         )
-        if self.behavior.error is not None:
-            raise self.behavior.error
-        if self.behavior.cancel_before_yield and cancellation is not None:
+        if behavior.error is not None:
+            raise behavior.error
+        if behavior.cancel_before_yield and cancellation is not None:
             cancellation.cancel()
-        yield from self.behavior.fragments
+        yield from behavior.fragments
 
 
 def _model(
@@ -70,11 +75,13 @@ def _model(
         size_bytes=size,
         capabilities=frozenset(capabilities or {"completion"}),
         details=ModelDetails(family="test"),
+        automatic_eligible=True,
+        curated_purposes=frozenset({"team"}),
     )
 
 
 def _council(
-    behaviors: dict[str, ProviderBehavior],
+    behaviors: dict[str, ProviderBehavior | list[ProviderBehavior]],
     calls: list[dict[str, Any]],
     *,
     limits: CouncilLimits | None = None,
@@ -107,16 +114,18 @@ def test_council_runs_each_physical_model_sequentially_without_tools() -> None:
 
     assert run.result.status is CouncilStatus.COMPLETE
     assert run.result.final == "final synthesis"
-    assert [call["model"] for call in calls] == ["alpha", "beta", "lead"]
+    # The unparseable lead triage reply falls back to running the full council,
+    # so the first call is the lead triage followed by every specialist.
+    assert [call["model"] for call in calls] == ["lead", "alpha", "beta", "lead"]
     assert all(call["tools"] is None for call in calls)
     assert [event.sequence for event in run.events] == list(range(1, len(run.events) + 1))
     assert all(isinstance(event, TeamActivityEvent) for event in run.events)
     assert run.events[0].kind is ActivityKind.COUNCIL_STARTED
     assert run.events[-1].kind is ActivityKind.COUNCIL_COMPLETED
-    assert "alpha output" not in calls[1]["messages"][-1].content
-    assert "alpha output" in calls[2]["messages"][-1].content
-    assert "beta output" in calls[2]["messages"][-1].content
-    assert "hidden chain-of-thought" in calls[0]["messages"][0].content
+    assert "alpha output" not in calls[2]["messages"][-1].content
+    assert "alpha output" in calls[3]["messages"][-1].content
+    assert "beta output" in calls[3]["messages"][-1].content
+    assert "hidden chain-of-thought" in calls[1]["messages"][0].content
 
 
 def test_council_bounds_inputs_worker_results_and_final_synthesis() -> None:
@@ -149,10 +158,10 @@ def test_council_bounds_inputs_worker_results_and_final_synthesis() -> None:
     assert len(run.result.final) == limits.max_final_output_chars
     assert run.result.final.endswith("[truncated]")
     assert run.result.final_truncated is True
-    worker_prompt = calls[0]["messages"][-1].content
+    worker_prompt = calls[1]["messages"][-1].content
     assert "P" * 31 not in worker_prompt
     assert "C" * 21 not in worker_prompt
-    synthesis_prompt = calls[1]["messages"][-1].content
+    synthesis_prompt = calls[2]["messages"][-1].content
     assert "W" * 41 not in synthesis_prompt
 
 
@@ -173,7 +182,7 @@ def test_worker_failure_is_visible_and_does_not_stop_remaining_models() -> None:
         ],
     )
 
-    assert [call["model"] for call in calls] == ["bad", "good", "lead"]
+    assert [call["model"] for call in calls] == ["lead", "bad", "good", "lead"]
     assert run.result.status is CouncilStatus.PARTIAL
     failed = next(item for item in run.result.workers if item.member.model_tag == "bad")
     assert failed.status is WorkerStatus.FAILED
@@ -246,7 +255,7 @@ def test_cancellation_during_worker_stops_before_later_models() -> None:
         cancellation=token,
     )
 
-    assert [call["model"] for call in calls] == ["first"]
+    assert [call["model"] for call in calls] == ["lead", "first"]
     assert run.result.status is CouncilStatus.CANCELLED
     assert any(event.kind is ActivityKind.WORKER_CANCELLED for event in run.events)
 
@@ -328,3 +337,64 @@ def test_no_conversational_models_produces_honest_failed_result() -> None:
     assert run.result.failure is not None
     assert run.result.failure.code == "no_conversational_model"
     assert run.result.workers[0].status is WorkerStatus.SKIPPED
+
+
+def test_triage_runs_only_selected_specialists() -> None:
+    calls: list[dict[str, Any]] = []
+    behaviors: dict[str, ProviderBehavior | list[ProviderBehavior]] = {
+        "alpha": ProviderBehavior((Message(role="assistant", content="alpha output"),)),
+        "beta": ProviderBehavior((Message(role="assistant", content="beta output"),)),
+        "lead": [
+            ProviderBehavior((Message(role="assistant", content="verifier"),)),
+            ProviderBehavior((Message(role="assistant", content="final synthesis"),)),
+        ],
+    }
+    council = _council(behaviors, calls)
+    models = [
+        _model("lead", capabilities={"completion", "tools"}, size=12),
+        _model("beta", capabilities={"completion", "thinking"}, size=7),
+        _model("alpha", size=5),
+    ]
+
+    run = council.run(
+        CouncilRequest(prompt="Check this claim", run_id="triage-subset"),
+        models,
+        preferred_lead="lead",
+    )
+
+    assert run.result.status is CouncilStatus.COMPLETE
+    assert [call["model"] for call in calls] == ["lead", "beta", "lead"]
+    assert any(event.kind is ActivityKind.TRIAGE_COMPLETED for event in run.events)
+    skipped = next(
+        item for item in run.result.workers if item.member.model_tag == "alpha"
+    )
+    assert skipped.status is WorkerStatus.SKIPPED
+    assert skipped.failure is not None
+    assert skipped.failure.code == "triage_skipped"
+
+
+def test_triage_none_skips_workers_and_synthesis() -> None:
+    calls: list[dict[str, Any]] = []
+    behaviors: dict[str, ProviderBehavior | list[ProviderBehavior]] = {
+        "alpha": ProviderBehavior((Message(role="assistant", content="unused"),)),
+        "lead": ProviderBehavior((Message(role="assistant", content="NONE"),)),
+    }
+    council = _council(behaviors, calls)
+    models = [
+        _model("lead", capabilities={"completion", "tools"}, size=12),
+        _model("alpha", size=5),
+    ]
+
+    run = council.run(
+        CouncilRequest(prompt="what do you think of what you wrote?", run_id="triage-none"),
+        models,
+        preferred_lead="lead",
+    )
+
+    assert run.result.status is CouncilStatus.COMPLETE
+    assert run.result.final == ""
+    assert [call["model"] for call in calls] == ["lead"]
+    assert run.events[-1].kind is ActivityKind.COUNCIL_COMPLETED
+    assert all(
+        item.status is WorkerStatus.SKIPPED for item in run.result.workers
+    )

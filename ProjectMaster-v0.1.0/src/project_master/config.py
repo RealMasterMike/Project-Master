@@ -10,14 +10,17 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class MasterConfig(BaseModel):
-    model: str = "qwen3:8b"
+    model: str = (
+        "hf.co/TrevorJS/gemma-4-E4B-it-uncensored-GGUF:Q4_K_M"
+    )
     ollama_url: str = "http://127.0.0.1:11434"
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
-    num_ctx: int = Field(default=8192, ge=2048, le=1048576)
+    num_ctx: int = Field(default=65536, ge=2048, le=1048576)
     max_response_tokens: int = Field(default=2048, ge=128, le=32768)
     team_role_max_tokens: int = Field(default=768, ge=128, le=8192)
     max_prompt_chars: int = Field(default=24000, ge=8000, le=500000)
     max_tool_rounds: int = Field(default=6, ge=1, le=30)
+    max_auto_continuations: int = Field(default=2, ge=0, le=6)
     max_history_messages: int = Field(default=30, ge=2, le=500)
     db_path: Path = Path("master.db")
     workspace_root: Path = Path("workspace")
@@ -49,6 +52,7 @@ class MasterConfig(BaseModel):
             "MASTER_MAX_RESPONSE_TOKENS": ("max_response_tokens", int),
             "MASTER_TEAM_ROLE_MAX_TOKENS": ("team_role_max_tokens", int),
             "MASTER_MAX_PROMPT_CHARS": ("max_prompt_chars", int),
+            "MASTER_MAX_AUTO_CONTINUATIONS": ("max_auto_continuations", int),
             "MASTER_DB_PATH": ("db_path", Path),
             "MASTER_WORKSPACE_ROOT": ("workspace_root", Path),
             "MASTER_ALLOW_FILE_WRITES": ("allow_file_writes", _parse_bool),

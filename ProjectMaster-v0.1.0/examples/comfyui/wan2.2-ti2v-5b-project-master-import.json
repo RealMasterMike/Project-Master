@@ -1,0 +1,267 @@
+{
+  "bindings": [
+    {
+      "choices": [],
+      "default_value": "A cinematic tracking shot of a red fox walking through a misty pine forest at dawn, natural movement, soft volumetric light, detailed fur, stable camera motion.",
+      "description": "What should happen in the generated video?",
+      "id": "prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "6",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": "oversaturated, overexposed, static, blurry details, subtitles, watermark, painting, still image, gray cast, worst quality, low quality, JPEG artifacts, malformed anatomy, extra limbs, fused details, chaotic background, reverse motion",
+      "description": "Visual qualities to discourage.",
+      "id": "negative_prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "7",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": 123456789,
+      "description": "Deterministic generation seed.",
+      "id": "seed",
+      "input_name": "seed",
+      "maximum": 2147483647,
+      "minimum": 0,
+      "node_id": "3",
+      "required": false,
+      "value_type": "integer"
+    },
+    {
+      "choices": [],
+      "default_value": 20,
+      "description": "Sampling steps. More steps take longer.",
+      "id": "steps",
+      "input_name": "steps",
+      "maximum": 40,
+      "minimum": 1,
+      "node_id": "3",
+      "required": false,
+      "value_type": "integer"
+    },
+    {
+      "choices": [],
+      "default_value": 5,
+      "description": "Prompt guidance strength.",
+      "id": "guidance",
+      "input_name": "cfg",
+      "maximum": 10,
+      "minimum": 1,
+      "node_id": "3",
+      "required": false,
+      "value_type": "number"
+    },
+    {
+      "choices": [
+        384,
+        512,
+        640,
+        832,
+        1280
+      ],
+      "default_value": 640,
+      "description": "Output width. Larger sizes require more time and memory.",
+      "id": "width",
+      "input_name": "width",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "55",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        224,
+        288,
+        352,
+        480,
+        704
+      ],
+      "default_value": 352,
+      "description": "Output height. Larger sizes require more time and memory.",
+      "id": "height",
+      "input_name": "height",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "55",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        9,
+        17,
+        25,
+        33,
+        49,
+        81,
+        121
+      ],
+      "default_value": 49,
+      "description": "Number of generated frames.",
+      "id": "frames",
+      "input_name": "length",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "55",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        12,
+        16,
+        24
+      ],
+      "default_value": 24,
+      "description": "Playback frames per second.",
+      "id": "fps",
+      "input_name": "fps",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "57",
+      "required": false,
+      "value_type": "enum"
+    }
+  ],
+  "name": "Wan 2.2 TI2V 5B — local video",
+  "purpose": "video",
+  "workflow": {
+    "3": {
+      "class_type": "KSampler",
+      "inputs": {
+        "cfg": 5,
+        "denoise": 1,
+        "latent_image": [
+          "55",
+          0
+        ],
+        "model": [
+          "48",
+          0
+        ],
+        "negative": [
+          "7",
+          0
+        ],
+        "positive": [
+          "6",
+          0
+        ],
+        "sampler_name": "uni_pc",
+        "scheduler": "simple",
+        "seed": 123456789,
+        "steps": 20
+      }
+    },
+    "6": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "38",
+          0
+        ],
+        "text": "A cinematic tracking shot of a red fox walking through a misty pine forest at dawn, natural movement, soft volumetric light, detailed fur, stable camera motion."
+      }
+    },
+    "7": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "38",
+          0
+        ],
+        "text": "oversaturated, overexposed, static, blurry details, subtitles, watermark, painting, still image, gray cast, worst quality, low quality, JPEG artifacts, malformed anatomy, extra limbs, fused details, chaotic background, reverse motion"
+      }
+    },
+    "8": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "3",
+          0
+        ],
+        "vae": [
+          "39",
+          0
+        ]
+      }
+    },
+    "37": {
+      "class_type": "UNETLoader",
+      "inputs": {
+        "unet_name": "wan2.2_ti2v_5B_fp16.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    "38": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "device": "default",
+        "type": "wan"
+      }
+    },
+    "39": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "wan2.2_vae.safetensors"
+      }
+    },
+    "48": {
+      "class_type": "ModelSamplingSD3",
+      "inputs": {
+        "model": [
+          "37",
+          0
+        ],
+        "shift": 8
+      }
+    },
+    "55": {
+      "class_type": "Wan22ImageToVideoLatent",
+      "inputs": {
+        "batch_size": 1,
+        "height": 352,
+        "length": 49,
+        "vae": [
+          "39",
+          0
+        ],
+        "width": 640
+      }
+    },
+    "57": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "bit_depth": 8,
+        "fps": 24,
+        "images": [
+          "8",
+          0
+        ]
+      }
+    },
+    "58": {
+      "class_type": "SaveVideo",
+      "inputs": {
+        "codec": "h264",
+        "filename_prefix": "ProjectMaster/wan2.2-ti2v-5b",
+        "format": "mp4",
+        "video": [
+          "57",
+          0
+        ]
+      }
+    }
+  }
+}

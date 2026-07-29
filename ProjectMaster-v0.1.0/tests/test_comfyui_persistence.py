@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -10,6 +11,7 @@ from project_master.integrations.comfyui.artifacts import (
 )
 from project_master.integrations.comfyui.jobs import (
     ArtifactStatus,
+    ComfyInputImageProvenance,
     ComfyJob,
     JobConflictError,
     JobStatus,
@@ -65,12 +67,20 @@ def test_profiles_and_workflow_decisions_survive_restart(tmp_path) -> None:
 
 def test_comfy_jobs_are_durable_and_optimistically_versioned(tmp_path) -> None:
     store = SQLiteComfyStore(SQLiteStore(tmp_path / "master.db"))
+    input_image = ComfyInputImageProvenance(
+        binding_id="source_image",
+        source_asset_id=f"media-asset-{'a' * 32}",
+        source_sha256="b" * 64,
+        source_name="source.png",
+    )
     created = store.create(
         ComfyJob.new(
             job_id="comfy-job-one",
             profile_id="studio",
             workflow_revision_id="workflow-one",
             client_id="project-master-one",
+            project_id="project-creator-one",
+            input_images=(input_image,),
             now=datetime(2026, 7, 27, tzinfo=UTC),
         )
     )
@@ -84,9 +94,43 @@ def test_comfy_jobs_are_durable_and_optimistically_versioned(tmp_path) -> None:
     saved = store.save(queued, expected_version=created.version)
 
     assert saved.version == 2
-    assert SQLiteComfyStore(SQLiteStore(tmp_path / "master.db")).get(saved.id) == saved
+    restored = SQLiteComfyStore(SQLiteStore(tmp_path / "master.db")).get(saved.id)
+    assert restored == saved
+    assert restored.project_id == "project-creator-one"
+    assert restored.input_images == (input_image,)
     with pytest.raises(JobConflictError):
         store.save(queued, expected_version=created.version)
+
+
+def test_legacy_comfy_job_without_project_id_loads_from_sqlite(tmp_path) -> None:
+    database = SQLiteStore(tmp_path / "master.db")
+    store = SQLiteComfyStore(database)
+    created = store.create(
+        ComfyJob.new(
+            job_id="comfy-job-legacy",
+            profile_id="studio",
+            workflow_revision_id="workflow-one",
+            client_id="project-master-legacy",
+            now=datetime(2026, 7, 27, tzinfo=UTC),
+        )
+    )
+    with database.connection() as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM comfy_jobs WHERE id = ?",
+            (created.id,),
+        ).fetchone()
+        payload = json.loads(str(row["payload_json"]))
+        payload.pop("project_id")
+        payload.pop("input_images")
+        connection.execute(
+            "UPDATE comfy_jobs SET payload_json = ? WHERE id = ?",
+            (json.dumps(payload), created.id),
+        )
+
+    restored = SQLiteComfyStore(SQLiteStore(tmp_path / "master.db")).get(created.id)
+
+    assert restored.project_id is None
+    assert restored.input_images == ()
 
 
 def test_imported_artifact_provenance_survives_sqlite_restart(tmp_path) -> None:

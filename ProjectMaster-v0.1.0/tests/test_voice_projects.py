@@ -19,6 +19,7 @@ from project_master.integrations.voice.projects import (
     RenderSettings,
     ScriptBlock,
     VoiceProject,
+    VoiceWorkflowOrigin,
 )
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -158,3 +159,20 @@ def test_non_synthesis_project_revision_changes_instance_not_cache_identity() ->
     assert [chunk.cache_key for chunk in first] == [
         chunk.cache_key for chunk in renamed
     ]
+
+
+def test_legacy_chat_speech_project_is_classified_as_internal() -> None:
+    legacy = VoiceProject.create(
+        project_id="chat-speech-legacy",
+        name="Chat speech",
+        language="en",
+        default_voice_profile_id="voice-1",
+        blocks=(ScriptBlock(id="message", text="Legacy speech."),),
+        created_at=NOW,
+    ).model_dump()
+    legacy.pop("origin")
+
+    restored = VoiceProject.model_validate(legacy)
+
+    assert restored.origin is VoiceWorkflowOrigin.CHAT_SPEECH
+    assert restored.studio_visible is False

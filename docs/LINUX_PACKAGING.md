@@ -51,12 +51,13 @@ ollama serve
 ollama list
 ```
 
-Project Master discovers compatible installed model identities for Team mode. Tool-calling support
-is recommended for the selected lead model. A model without tool support can still contribute as a
-specialist, but it cannot make the application invent tool calls that the model does not produce.
-Pull a model only as an explicit setup decision. The current candidate machine already has models
-but does not have its configured `qwen3:8b` default, so the first GUI pass must select an installed
-model rather than silently downloading that tag.
+Project Master inspects installed model identities for Team mode, but automatic Direct, Team, and
+Dream selection is limited to exact curated tags whose Ollama manifest digest matches a physically
+tested identity and whose curated purpose matches that path. Execution admission refreshes the
+catalog so a replaced mutable tag is not trusted from stale status data. Other installed tags
+remain manual/unverified and do not silently join an automatic council. Tool-calling support is
+recommended for a deliberately selected lead; the application cannot invent tool calls a model
+does not produce. Pull any model only as an explicit setup decision.
 
 Project Master's model clients share one residency coordinator: switching models unloads the prior
 Project Master runner before loading the next, and GPU Chatterbox startup unloads Project Master's
@@ -65,6 +66,14 @@ that previously caused Linux to OOM-kill Ollama while loading the 26B SuperGemma
 shutdown also unloads the final Project Master runner before relaunch. Ollama's tag-scoped unload
 API cannot distinguish two applications using the same tag, so do not concurrently use another
 Ollama client with Project Master on a memory-constrained machine.
+
+Ollama and ComfyUI also use a bounded GPU handoff. Before interactive Ollama use, Project Master
+waits for every reachable configured ComfyUI queue to become idle and then calls the official
+ComfyUI `POST /free` endpoint with both model unloading and memory release enabled. Active ComfyUI
+queues stay on the existing local-model busy path; offline optional profiles do not prevent chat
+from starting. Before Project Master submits a ComfyUI workflow, it unloads only the Ollama runner
+tracked by its own client family. This is cache coordination, not ownership of prompts submitted
+by other ComfyUI clients.
 
 Optional Fedora packages improve local creator features:
 
@@ -88,11 +97,11 @@ cd ProjectMaster-v0.1.0
 cd ..
 npm test -- --run
 npm run build
-/home/mike/.cargo/bin/cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-/home/mike/.cargo/bin/cargo clippy \
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo clippy \
   --manifest-path src-tauri/Cargo.toml \
   --all-targets --all-features -- -D warnings
-/home/mike/.cargo/bin/cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 The default build creates an isolated environment at
@@ -294,7 +303,12 @@ Ollama thinking metadata is not universally reliable: the installed 26B conversi
 private thinking stream while `/api/show` omitted the capability. The v0.3 client therefore sends
 `think: false` defensively for non-GPT-OSS models and requests `low` for GPT-OSS. Automatic
 per-model discovery of boolean versus level-based thinking controls remains future work; it must
-record whether a mode came from provider metadata or a bounded local probe.
+record whether a mode came from provider metadata or a bounded local probe. If a generation still
+spends its full allowance in private thinking, the client makes one hidden, larger visible-answer
+retry and never publishes the trace. Ollama's `done_reason` is preserved through streaming so
+`length` stops and dropped terminal frames enter the agent's normal bounded continuation path.
+Clear untagged task deliberation from converted models is repaired once before it can be stored or
+shown; a failed repair produces a neutral user-facing error instead of exposing planning notes.
 
 ## Fedora acceptance checklist
 

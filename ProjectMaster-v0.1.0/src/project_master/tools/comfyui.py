@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from project_master.integrations.comfyui.defaults import bundled_workflow_ids
 from project_master.integrations.comfyui.persistence import SQLiteComfyStore
 from project_master.integrations.comfyui.service import ComfyUIService
 from project_master.tools.base import Tool, ToolRegistry
@@ -14,6 +15,8 @@ def register_comfyui_tools(
     persistence: SQLiteComfyStore,
 ) -> None:
     """Expose bounded ComfyUI operations without arbitrary REST or graph submission."""
+
+    curated_workflow_ids = bundled_workflow_ids()
 
     registry.register(
         Tool(
@@ -63,7 +66,11 @@ def register_comfyui_tools(
                     {
                         "id": item.revision.id,
                         "name": item.revision.name,
+                        "purpose": item.revision.purpose,
                         "digest": item.revision.digest,
+                        "curated_default": (
+                            item.revision.id in curated_workflow_ids
+                        ),
                         "bindings": [
                             binding.model_dump(mode="json")
                             for binding in item.revision.bindings
@@ -117,6 +124,23 @@ def register_comfyui_tools(
         )
     )
 
+    def scoped_job_id(args: dict[str, Any]) -> str:
+        """Refuse to touch a job that belongs to a different conversation scope.
+
+        Job IDs are guessable and the service accessors are not project-aware, so without
+        this check a chat scoped to one Creator project could read, poll, or cancel another
+        project's job. A rootless chat owns only rootless jobs.
+        """
+
+        job_id = str(args["job_id"])
+        owner = service.job_status(job_id).project_id
+        if owner != registry.project_id:
+            raise PermissionError(
+                f"ComfyUI job {job_id!r} belongs to a different project and is not "
+                "accessible from this conversation."
+            )
+        return job_id
+
     def run_workflow(args: dict[str, Any]) -> dict[str, Any]:
         revision_id = str(args["workflow_revision_id"])
         stored = persistence.get_workflow(revision_id)
@@ -132,6 +156,7 @@ def register_comfyui_tools(
                 str(args["profile_id"]),
                 revision_id,
                 values,
+                project_id=registry.project_id,
             )
         ).model_dump(mode="json")
 
@@ -168,7 +193,7 @@ def register_comfyui_tools(
                 "additionalProperties": False,
             },
             handler=lambda args: _run(
-                service.refresh_job(str(args["job_id"]))
+                service.refresh_job(scoped_job_id(args))
             ).model_dump(mode="json"),
         )
     )
@@ -187,7 +212,7 @@ def register_comfyui_tools(
                 "additionalProperties": False,
             },
             handler=lambda args: _run(
-                service.cancel_job(str(args["job_id"]))
+                service.cancel_job(scoped_job_id(args))
             ).model_dump(mode="json"),
         )
     )
@@ -205,7 +230,7 @@ def register_comfyui_tools(
             handler=lambda args: {
                 "artifacts": [
                     artifact.model_dump(mode="json")
-                    for artifact in service.artifacts(str(args["job_id"]))
+                    for artifact in service.artifacts(scoped_job_id(args))
                 ]
             },
         )

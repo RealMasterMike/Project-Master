@@ -64,6 +64,8 @@ _JOB_TRANSITIONS: dict[str, set[str]] = {
     "cancelled": set(),
 }
 
+_PROJECT_TYPES = frozenset({"general", "creator"})
+
 
 class OrchestrationStore:
     """Project-scoped, append-friendly state layered on the existing SQLite database."""
@@ -259,8 +261,12 @@ class OrchestrationStore:
             )
 
     def create_project(self, spec: ProjectSpec) -> str:
+        if spec.project_type not in _PROJECT_TYPES:
+            raise ValueError(f"Unsupported project type: {spec.project_type}")
         project_id = _id("project")
         now = _now()
+        metadata = dict(spec.metadata)
+        metadata["project_type"] = spec.project_type
         with self.store.connection() as conn:
             conn.execute(
                 """
@@ -273,7 +279,7 @@ class OrchestrationStore:
                     spec.name,
                     spec.root_path,
                     spec.description,
-                    _json(spec.metadata),
+                    _json(metadata),
                     now,
                     now,
                 ),
@@ -281,31 +287,54 @@ class OrchestrationStore:
         return project_id
 
     def get_or_create_project(self, spec: ProjectSpec) -> str:
+        if spec.project_type not in _PROJECT_TYPES:
+            raise ValueError(f"Unsupported project type: {spec.project_type}")
         with self.store.connection() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
-                SELECT id FROM projects
+                SELECT id, metadata_json FROM projects
                 WHERE name = ? AND COALESCE(root_path, '') = COALESCE(?, '')
                 ORDER BY created_at
-                LIMIT 1
                 """,
                 (spec.name, spec.root_path),
-            ).fetchone()
-        if row is not None:
-            return str(row["id"])
+            ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(str(row["metadata_json"]))
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+            project_type = (
+                metadata.get("project_type")
+                if isinstance(metadata, dict)
+                else None
+            )
+            if (project_type or "general") == spec.project_type:
+                return str(row["id"])
         return self.create_project(spec)
 
-    def list_projects(self, include_archived: bool = False) -> list[dict[str, Any]]:
+    def list_projects(
+        self,
+        include_archived: bool = False,
+        project_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if project_type is not None and project_type not in _PROJECT_TYPES:
+            raise ValueError(f"Unsupported project type: {project_type}")
         sql = "SELECT * FROM projects"
         params: tuple[Any, ...] = ()
         if not include_archived:
             sql += " WHERE status = ?"
             params = ("active",)
         sql += " ORDER BY updated_at DESC"
-        return self._rows(sql, params)
+        projects = [_with_project_type(item) for item in self._rows(sql, params)]
+        if project_type is not None:
+            projects = [
+                item for item in projects if item["project_type"] == project_type
+            ]
+        return projects
 
     def get_project(self, project_id: str) -> dict[str, Any] | None:
-        return self._row("SELECT * FROM projects WHERE id = ?", (project_id,))
+        project = self._row("SELECT * FROM projects WHERE id = ?", (project_id,))
+        return _with_project_type(project) if project is not None else None
 
     def set_project_dreaming(
         self,
@@ -345,7 +374,7 @@ class OrchestrationStore:
             ).fetchone()
         if updated is None:  # pragma: no cover - protected by the write transaction.
             raise RuntimeError("Project Dream consent update was not persisted.")
-        return _decode_row(dict(updated))
+        return _with_project_type(_decode_row(dict(updated)))
 
     def create_run(self, spec: RunSpec) -> str:
         self._require_project(spec.project_id)
@@ -955,6 +984,13 @@ def _decode_row(item: dict[str, Any]) -> dict[str, Any]:
                 item[key.removesuffix("_json")] = raw
     if "reversible" in item:
         item["reversible"] = bool(item["reversible"])
+    return item
+
+
+def _with_project_type(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata")
+    raw_type = metadata.get("project_type") if isinstance(metadata, dict) else None
+    item["project_type"] = raw_type if raw_type in _PROJECT_TYPES else "general"
     return item
 
 

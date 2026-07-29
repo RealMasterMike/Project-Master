@@ -1,0 +1,237 @@
+{
+  "bindings": [
+    {
+      "choices": [],
+      "default_value": null,
+      "description": "Verified project image to transform.",
+      "id": "source_image",
+      "input_name": "image",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "10",
+      "required": true,
+      "value_type": "image_asset"
+    },
+    {
+      "choices": [],
+      "default_value": "Restyle the source while preserving its recognizable subject and composition.",
+      "description": "Describe the desired edit.",
+      "id": "prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "6",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": "low quality, blurry, distorted, deformed, watermark, text",
+      "description": "Visual qualities to discourage.",
+      "id": "negative_prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "7",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": 0,
+      "description": "Deterministic generation seed.",
+      "id": "seed",
+      "input_name": "seed",
+      "maximum": 2147483647,
+      "minimum": 0,
+      "node_id": "3",
+      "required": false,
+      "value_type": "integer"
+    },
+    {
+      "choices": [
+        512,
+        768,
+        1024
+      ],
+      "default_value": 768,
+      "description": "Working width in pixels.",
+      "id": "width",
+      "input_name": "width",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "12",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        512,
+        768,
+        1024
+      ],
+      "default_value": 768,
+      "description": "Working height in pixels.",
+      "id": "height",
+      "input_name": "height",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "12",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [],
+      "default_value": 0.55,
+      "description": "Edit strength. Lower values preserve more of the source.",
+      "id": "strength",
+      "input_name": "denoise",
+      "maximum": 0.95,
+      "minimum": 0.05,
+      "node_id": "3",
+      "required": false,
+      "value_type": "number"
+    },
+    {
+      "choices": [
+        16,
+        20,
+        25,
+        30
+      ],
+      "default_value": 20,
+      "description": "Sampling steps. More steps take longer.",
+      "id": "steps",
+      "input_name": "steps",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "3",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [],
+      "default_value": 6,
+      "description": "Prompt guidance strength.",
+      "id": "guidance",
+      "input_name": "cfg",
+      "maximum": 10,
+      "minimum": 1,
+      "node_id": "3",
+      "required": false,
+      "value_type": "number"
+    }
+  ],
+  "name": "RealVisXL V5.0 SFW + NSFW — Image to Image",
+  "purpose": "image",
+  "workflow": {
+    "3": {
+      "class_type": "KSampler",
+      "inputs": {
+        "cfg": 6,
+        "denoise": 0.55,
+        "latent_image": [
+          "11",
+          0
+        ],
+        "model": [
+          "4",
+          0
+        ],
+        "negative": [
+          "7",
+          0
+        ],
+        "positive": [
+          "6",
+          0
+        ],
+        "sampler_name": "dpmpp_2m_sde",
+        "scheduler": "karras",
+        "seed": 0,
+        "steps": 20
+      }
+    },
+    "4": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": {
+        "ckpt_name": "RealVisXL_V5.0_fp16.safetensors"
+      }
+    },
+    "6": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "4",
+          1
+        ],
+        "text": "Restyle the source while preserving its recognizable subject and composition."
+      }
+    },
+    "7": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "4",
+          1
+        ],
+        "text": "low quality, blurry, distorted, deformed, watermark, text"
+      }
+    },
+    "8": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "3",
+          0
+        ],
+        "vae": [
+          "4",
+          2
+        ]
+      }
+    },
+    "9": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "ProjectMaster/realvisxl-v5-i2i",
+        "images": [
+          "8",
+          0
+        ]
+      }
+    },
+    "10": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "example.png"
+      }
+    },
+    "11": {
+      "class_type": "VAEEncode",
+      "inputs": {
+        "pixels": [
+          "12",
+          0
+        ],
+        "vae": [
+          "4",
+          2
+        ]
+      }
+    },
+    "12": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "crop": "center",
+        "height": 768,
+        "image": [
+          "10",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 768
+      }
+    }
+  }
+}

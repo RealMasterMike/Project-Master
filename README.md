@@ -21,9 +21,11 @@ control of the machine.
 
 ### Multi-AI Ollama Team
 
-- **Team mode** discovers compatible physical models from the local Ollama catalog, de-duplicates
-  aliases, selects a tool-capable lead when available, and assigns bounded specialist roles based
-  on reported capabilities.
+- **Team mode** de-duplicates aliases in the local Ollama catalog, then automatically assigns only
+  exact publisher-evidenced model identities whose installed manifest digest matches the curated
+  registry. It selects a tool-capable lead when available and assigns bounded specialist roles
+  based on reported capabilities; other installed models remain manual/unverified rather than
+  silently joining the council.
 - The council runs specialists sequentially so machines with limited VRAM do not have to keep every
   model active at once. MASTER synthesizes one final response and owns the only tool loop.
 - The **Team Strip** and **Run Rail** show model assignments, worker status, tool summaries,
@@ -55,7 +57,7 @@ control of the machine.
   default.
 - The separate **Approval Center** lists and resolves explicit runtime approval records. It does not
   yet intercept every consequential chat tool call automatically, and it never converts product
-  proposals in [`ideas.md`](ideas.md) or [`approvals.md`](approvals.md) into runtime permission.
+  proposals or planning decisions into runtime permission.
 
 ### Dream Lab
 
@@ -77,6 +79,10 @@ control of the machine.
 - Queue, monitor, cancel, and reconcile Project Master-owned jobs. Completed image, audio, video,
   and file outputs are retrieved by the backend, size/MIME checked, hashed, and stored atomically
   with workflow and prompt provenance.
+- Creator projects add a private Media library, structured idea workspace, and separate
+  Text-to-Image, Text-to-Video, Image-to-Image, and Image-to-Video surfaces. Only the four bundled
+  publisher-documented defaults are curated automatically; imported workflows remain visibly
+  manual/unverified.
 - The Creator job ledger presents verified output metadata, safe provenance, authenticated local
   downloads, and inline image, audio, or video previews when the MIME type supports them.
 - Loopback is the safe default. Remote profiles require explicit host trust and do not follow
@@ -100,9 +106,21 @@ Project Master needs [Ollama](https://ollama.com/download) running locally and a
 conversational model:
 
 ```bash
-ollama pull qwen3:8b
+ollama pull hf.co/TrevorJS/gemma-4-E4B-it-uncensored-GGUF:Q4_K_M
 ollama serve
 ```
+
+For local Creator-image analysis, install the exact physically verified uncensored vision default:
+
+```bash
+ollama pull lukey03/qwen3.5-9b-abliterated-vision:latest
+```
+
+Automatic chat, vision, Team, and Dream selection require a physically tested tag plus Ollama
+manifest digest from the curated registry. Other explicitly selected Ollama models remain
+manual/unverified; Project Master does not infer provenance from a model name. Automatic execution
+refreshes the installed identity and requires the purpose appropriate to Direct, vision, Team, or
+Dream use.
 
 For a source checkout, install the Fedora/Tauri prerequisites listed in
 [`docs/LINUX_PACKAGING.md`](docs/LINUX_PACKAGING.md), plus Node.js 20 or newer, Rust stable, and a
@@ -173,7 +191,6 @@ live in the current user's application-data directory rather than the installati
 - `docs/LINUX_PACKAGING.md` — Fedora build, install, and acceptance-test guide
 - `docs/UI_CUSTOMIZATION.md` — validated layout architecture and future AI-control boundary
 - `CHANGELOG.md` — release history and the mandatory documentation gate for every uploaded build
-- `DESIGN_BRIEF.md` — original MVP design brief and historical constraints
 - `ProjectMaster-v0.1.0/ROADMAP.md` — current implementation scope and release-engineering status
 
 ## Change the accent color

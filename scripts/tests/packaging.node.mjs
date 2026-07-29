@@ -21,15 +21,20 @@ import {
   appImageOutputPluginPath,
   BUNDLE_MARKERS,
   brandedAppImageName,
-  finalizeLinuxAppImage,
+  createLinuxAppImageFromStagedDir,
+  linuxElfClass,
   linuxArtifactArchitecture,
   localLinuxBuildCommands,
+  removeForeignArchitectureGstPlugins,
+  removeForeignArchitectureLibDirs,
+  removeForeignArchitectureModules,
   tauriCacheDirectory,
   verifyBundleMarker,
 } from "../build-linux-local.mjs";
 import {
   buildBackendEnvironment,
   catalogModelSupportsCompletion,
+  isInsufficientVramFailure,
   catalogModelSupportsTools,
   parseAcceptanceArguments,
   prepareChatterboxClone,
@@ -56,7 +61,11 @@ import {
   validateTargetTriple,
   venvPython,
 } from "../lib/platform.mjs";
-import { verifyPackaging } from "../verify-packaging.mjs";
+import {
+  verifyExtractedGstreamerPluginArchitecture,
+  verifyPackaging,
+} from "../verify-packaging.mjs";
+import { curatedWorkflowFilenames } from "../build-backend-sidecar.mjs";
 
 test("packaging Python version parsing is strict and bounded", () => {
   assert.deepEqual(parsePythonVersion("3.11.15\n"), {
@@ -168,7 +177,7 @@ test("Linux acceptance arguments keep the exact staged AppDir and reports local"
       portableRoot,
       "release",
       "local",
-      `Project-Master-0.3.0-linux-${linuxArtifactArchitecture()}-acceptance`,
+      `Project-Master-0.4.0-linux-${linuxArtifactArchitecture()}-acceptance`,
     ),
   );
   assert.equal(options.modelTimeoutSeconds, 600);
@@ -754,13 +763,15 @@ test("local Linux orchestration builds once, skips old linuxdeploy strip, and ve
   );
 });
 
-test("AppImage finalization validates the staged identity and creates one branded artifact", async () => {
+test("AppImage production strips foreign plugins before creating the branded artifact", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "project-master-appimage-"));
   try {
     const appDir = path.join(fixture, "master.AppDir");
+    const pluginDir = path.join(appDir, "usr", "lib", "gstreamer-1.0");
     await Promise.all([
       mkdir(path.join(appDir, "usr", "bin"), { recursive: true }),
       mkdir(path.join(appDir, "usr", "lib"), { recursive: true }),
+      mkdir(pluginDir, { recursive: true }),
       mkdir(path.join(appDir, "usr", "libexec", "webkit2gtk-4.1"), {
         recursive: true,
       }),
@@ -808,22 +819,41 @@ test("AppImage finalization validates the staged identity and creates one brande
         path.join(appDir, "usr", "lib", "libgstreamer-1.0.so.0"),
         "gstreamer",
       ),
-      writeFile(path.join(fixture, "master_0.3.0_amd64.AppImage"), "image"),
+      writeFile(
+        path.join(pluginDir, "libgstforeign.so"),
+        Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1]),
+      ),
+      writeFile(
+        path.join(pluginDir, "libgstnative.so"),
+        Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2]),
+      ),
     ]);
 
-    const finalized = await finalizeLinuxAppImage({
+    const generated = path.join(fixture, "master_0.3.0_amd64.AppImage");
+    const finalized = await createLinuxAppImageFromStagedDir({
       bundleRoot: fixture,
       version: "0.3.0",
       architecture: "x64",
+      produceArtifact: async (cleanAppDir) => {
+        const bundledPlugins = (
+          await readdir(
+            path.join(cleanAppDir, "usr", "lib", "gstreamer-1.0"),
+          )
+        ).sort();
+        // This fixture artifact records exactly what its producer observed.
+        // A post-production cleanup would leave the foreign filename here.
+        await writeFile(generated, JSON.stringify(bundledPlugins));
+      },
     });
     assert.equal(
       finalized,
       path.join(fixture, brandedAppImageName("0.3.0", "x64")),
     );
-    assert.equal((await stat(finalized)).size, 5);
-    await assert.rejects(
-      access(path.join(fixture, "master_0.3.0_amd64.AppImage")),
+    assert.deepEqual(
+      JSON.parse(await readFile(finalized, "utf8")),
+      ["libgstnative.so"],
     );
+    await assert.rejects(access(generated));
     await verifyBundleMarker(
       path.join(appDir, "usr", "bin", "master"),
       BUNDLE_MARKERS.appImage,
@@ -831,4 +861,191 @@ test("AppImage finalization validates the staged identity and creates one brande
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
+});
+
+test("foreign-architecture GStreamer plugins are stripped from the AppDir", async () => {
+  // A 32-bit plugin staged beside a 64-bit libgstreamer made WebKit fail to
+  // build any audio pipeline, crashing the web process on first playback.
+  const root = await mkdtemp(path.join(os.tmpdir(), "pm-gst-"));
+  const pluginDir = path.join(root, "usr", "lib", "gstreamer-1.0");
+  await mkdir(pluginDir, { recursive: true });
+  const elf = (elfClass) =>
+    Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, elfClass]), Buffer.alloc(59)]);
+  await writeFile(path.join(pluginDir, "libgstforeign.so"), elf(1));
+  await writeFile(path.join(pluginDir, "libgstnative.so"), elf(2));
+  await writeFile(path.join(pluginDir, "notes.txt"), "keep me");
+
+  await assert.rejects(
+    verifyExtractedGstreamerPluginArchitecture(root, "x64"),
+    /libgstforeign\.so/,
+  );
+  const removed = await removeForeignArchitectureGstPlugins(root, "x64");
+
+  assert.deepEqual(removed, ["libgstforeign.so"]);
+  const remaining = (await readdir(pluginDir)).sort();
+  assert.deepEqual(remaining, ["libgstnative.so", "notes.txt"]);
+  assert.equal(
+    await verifyExtractedGstreamerPluginArchitecture(root, "x64"),
+    1,
+  );
+  await rm(root, { recursive: true, force: true });
+});
+
+test("GStreamer plugin filtering uses the target architecture's ELF class", async () => {
+  assert.equal(linuxElfClass("x64"), 2);
+  assert.equal(linuxElfClass("arm64"), 2);
+  assert.equal(linuxElfClass("arm"), 1);
+  assert.throws(() => linuxElfClass("ia32"), /Unsupported Linux/);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "pm-gst-arm-"));
+  const pluginDir = path.join(root, "usr", "lib", "gstreamer-1.0");
+  await mkdir(pluginDir, { recursive: true });
+  const elf = (elfClass) =>
+    Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, elfClass]), Buffer.alloc(59)]);
+  await writeFile(path.join(pluginDir, "libgstarm.so"), elf(1));
+  await writeFile(path.join(pluginDir, "libgstx64.so"), elf(2));
+
+  const removed = await removeForeignArchitectureGstPlugins(root, "arm");
+
+  assert.deepEqual(removed, ["libgstx64.so"]);
+  assert.deepEqual(await readdir(pluginDir), ["libgstarm.so"]);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("stripping GStreamer plugins tolerates an AppDir without a plugin directory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pm-gst-none-"));
+
+  assert.deepEqual(await removeForeignArchitectureGstPlugins(root, "x64"), []);
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test("the sidecar bundles exactly the curated workflow definitions", async () => {
+  const backendRoot = path.join(repoRoot, "ProjectMaster-v0.1.0");
+  const filenames = curatedWorkflowFilenames(backendRoot);
+
+  // Must match _BUNDLED_FILENAMES in defaults.py, which is the authoritative list.
+  assert.deepEqual(filenames, [
+    "chroma1-flash-uncensored-text-to-image-project-master-import.json",
+    "chroma1-flash-uncensored-image-to-image-project-master-import.json",
+    "realvisxl-v5-nsfw-capable-text-to-image-project-master-import.json",
+    "realvisxl-v5-nsfw-capable-image-to-image-project-master-import.json",
+    "wan2.2-lightx2v-4step-uncensored-project-master-import.json",
+    "wan2.2-lightx2v-4step-uncensored-image-to-video-project-master-import.json",
+  ]);
+
+  for (const filename of filenames) {
+    await access(path.join(backendRoot, "examples", "comfyui", filename));
+  }
+});
+
+test("manual and deprecated workflow graphs stay out of the sidecar", async () => {
+  const backendRoot = path.join(repoRoot, "ProjectMaster-v0.1.0");
+  const bundled = new Set(curatedWorkflowFilenames(backendRoot));
+  const present = await readdir(path.join(backendRoot, "examples", "comfyui"));
+
+  // These exist in the examples directory for manual import but are not runtime
+  // dependencies, so freezing them into the sidecar only inflates the package.
+  const excluded = present.filter(
+    (entry) => entry.endsWith(".json") && !bundled.has(entry),
+  );
+
+  assert.ok(
+    excluded.includes("wan2.2-rapid-mega-v12.1-nsfw-project-master-import.json"),
+    "expected the deprecated rapid-mega graph to be present but unbundled",
+  );
+  for (const entry of excluded) {
+    assert.equal(bundled.has(entry), false);
+  }
+});
+
+test("staging removes wholly foreign-architecture library directories", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pm-lib32-"));
+  const elf = (elfClass) =>
+    Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, elfClass]), Buffer.alloc(59)]);
+
+  const lib32 = path.join(root, "usr", "lib32");
+  const lib = path.join(root, "usr", "lib");
+  await mkdir(lib32, { recursive: true });
+  await mkdir(lib, { recursive: true });
+  await writeFile(path.join(lib32, "libgstreamer-1.0.so.0"), elf(1));
+  await writeFile(path.join(lib32, "libmount.so.1"), elf(1));
+  await writeFile(path.join(lib, "libgstreamer-1.0.so.0"), elf(2));
+
+  const removed = await removeForeignArchitectureLibDirs(root, "x64");
+
+  assert.deepEqual(removed, ["lib32"]);
+  await assert.rejects(() => access(lib32));
+  // The correctly-staged 64-bit runtime must survive untouched.
+  await access(path.join(lib, "libgstreamer-1.0.so.0"));
+  await rm(root, { recursive: true, force: true });
+});
+
+test("staging keeps a library directory that matches the target architecture", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pm-lib64-"));
+  const elf = (elfClass) =>
+    Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, elfClass]), Buffer.alloc(59)]);
+
+  const lib64 = path.join(root, "usr", "lib64");
+  await mkdir(lib64, { recursive: true });
+  await writeFile(path.join(lib64, "libc.so.6"), elf(2));
+
+  assert.deepEqual(await removeForeignArchitectureLibDirs(root, "x64"), []);
+  await access(path.join(lib64, "libc.so.6"));
+  await rm(root, { recursive: true, force: true });
+});
+
+test("acceptance treats a model too large for VRAM as skipped, not a package failure", () => {
+  const realOom =
+    'Ollama returned HTTP 500: {"error":"llama-server process has terminated: ' +
+    "exit status 1: cudaMalloc failed: out of memory\\nalloc_tensor_range: failed to " +
+    'allocate CUDA0 buffer of size 167116800"}';
+
+  assert.equal(isInsufficientVramFailure(realOom), true);
+  assert.equal(
+    isInsufficientVramFailure("CUDA error: out of memory"),
+    true,
+  );
+
+  // Ordinary failures must never be downgraded to a skip.
+  assert.equal(isInsufficientVramFailure(""), false);
+  assert.equal(isInsufficientVramFailure(undefined), false);
+  assert.equal(
+    isInsufficientVramFailure("Model response omitted the acceptance token."),
+    false,
+  );
+  assert.equal(
+    isInsufficientVramFailure("Ollama returned HTTP 500: internal error"),
+    false,
+  );
+  assert.equal(
+    isInsufficientVramFailure("the model ran out of patience"),
+    false,
+  );
+});
+
+test("staging removes foreign-architecture GIO modules but keeps matching ones", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pm-gio-"));
+  const elf = (elfClass) =>
+    Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, elfClass]), Buffer.alloc(59)]);
+
+  const modules = path.join(root, "usr", "lib", "gio", "modules");
+  await mkdir(modules, { recursive: true });
+  await writeFile(path.join(modules, "libgiognutls.so"), elf(1));
+  await writeFile(path.join(modules, "libgioopenssl.so"), elf(2));
+
+  const removed = await removeForeignArchitectureModules(root, "x64");
+
+  assert.deepEqual(removed, [
+    path.join("usr", "lib", "gio", "modules", "libgiognutls.so"),
+  ]);
+  await assert.rejects(() => access(path.join(modules, "libgiognutls.so")));
+  await access(path.join(modules, "libgioopenssl.so"));
+  await rm(root, { recursive: true, force: true });
+});
+
+test("GIO module sweep tolerates an AppDir without a module directory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pm-gio-none-"));
+  assert.deepEqual(await removeForeignArchitectureModules(root, "x64"), []);
+  await rm(root, { recursive: true, force: true });
 });

@@ -37,7 +37,7 @@ import {
   waitForReady,
 } from "./test-backend-sidecar.mjs";
 
-const EXPECTED_VERSION = "0.3.0";
+const EXPECTED_VERSION = "0.4.0";
 const BINDER_CODEWORD = "ORBITAL-PINE-731";
 const MODEL_RESPONSE_CODEWORD = "PROJECT_MASTER_MODEL_OK";
 const AUTHORIZED_MUTATION_CONTENT = "AUTHORIZED_WORKSPACE_MUTATION_V030";
@@ -240,6 +240,28 @@ function normalizedCapabilities(model) {
         .map((item) => item.trim().toLowerCase())
         .filter(Boolean)
       : [],
+  );
+}
+
+/**
+ * Recognise an Ollama failure caused by the model not fitting in GPU memory.
+ *
+ * Deliberately narrow: it requires an explicit allocator/out-of-memory signature so an
+ * ordinary model failure is never silently downgraded to a skip.
+ */
+export function isInsufficientVramFailure(detail) {
+  if (typeof detail !== "string" || !detail) return false;
+  const text = detail.toLowerCase();
+  const outOfMemory =
+    text.includes("out of memory") ||
+    text.includes("outofmemory") ||
+    text.includes("insufficient memory");
+  if (!outOfMemory) return false;
+  return (
+    text.includes("cudamalloc") ||
+    text.includes("cuda") ||
+    text.includes("alloc_tensor_range") ||
+    text.includes("failed to allocate")
   );
 }
 
@@ -1806,7 +1828,7 @@ export async function testLinuxAcceptance(argv = process.argv.slice(2)) {
       );
       assert(health?.ok === true, "Ollama is not healthy for acceptance.");
       return {
-        detail: "Missing/wrong tokens returned 401 and API/OpenAPI report 0.3.0.",
+        detail: "Missing/wrong tokens returned 401 and API/OpenAPI report 0.4.0.",
         unauthenticated_status: missing.response.status,
         wrong_token_status: wrong.response.status,
         version: ready.version,
@@ -1848,9 +1870,18 @@ export async function testLinuxAcceptance(argv = process.argv.slice(2)) {
               String(status.configured_model).toLowerCase(),
           )
         ) {
+          const recommended = String(status.recommended_model ?? "").trim();
+          assert(
+            recommended &&
+              status.models.some(
+                (tag) =>
+                  String(tag).toLowerCase() === recommended.toLowerCase(),
+              ),
+            "Configured model is absent and no installed recommendation was returned.",
+          );
           report.warnings.push(
             `Configured default ${status.configured_model} is not installed; ` +
-              "manual first-run model selection remains required.",
+              `the desktop will select installed recommendation ${recommended}.`,
           );
         }
         return {
@@ -1922,6 +1953,11 @@ export async function testLinuxAcceptance(argv = process.argv.slice(2)) {
         "Mutating tools do not require explicit chat authorization.",
       );
       assert(
+        payload?.external_network_tools_require_explicit_chat_authorization ===
+          true,
+        "External network tools do not require explicit chat authorization.",
+      );
+      assert(
         payload?.workspace_writes_enabled === true,
         "Acceptance workspace writes are not configured.",
       );
@@ -1937,15 +1973,25 @@ export async function testLinuxAcceptance(argv = process.argv.slice(2)) {
         assert(inventory.has(name), `Expected tool is missing: ${name}`);
       }
       for (const item of inventory.values()) {
+        const expectedRisk = item.mutating
+          ? "mutating"
+          : item.external_network
+            ? "external_network"
+            : "read_only";
         assert(
-          item.risk === (item.mutating ? "mutating" : "read_only"),
+          item.risk === expectedRisk,
           `Tool risk metadata is inconsistent: ${item.name}`,
         );
         assert(
-          item.available_in_default_chat === !item.mutating,
+          item.available_in_default_chat ===
+            (!item.mutating && !item.external_network),
           `Default availability is inconsistent: ${item.name}`,
         );
       }
+      assert(
+        inventory.get("web_search")?.external_network === true,
+        "web_search is not classified as an external network tool.",
+      );
       for (const [name, diagnostic] of Object.entries(
         payload?.diagnostics ?? {},
       )) {
@@ -2594,9 +2640,24 @@ export async function testLinuxAcceptance(argv = process.argv.slice(2)) {
               record.detail = "Returned a completed Direct response.";
               console.log(`[PASS] model ${model.primary_tag}`);
             } catch (error) {
-              record.status = "failed";
-              record.detail = errorMessage(error, secrets);
-              console.error(`[FAIL] model ${model.primary_tag}: ${record.detail}`);
+              const detail = errorMessage(error, secrets);
+              if (isInsufficientVramFailure(detail)) {
+                // A model larger than the machine's VRAM cannot load here no matter how
+                // the package was built, so counting it as a package defect would block
+                // every release on this hardware. Record it truthfully as an environment
+                // limitation instead of hiding it.
+                record.status = "skipped";
+                record.detail =
+                  "Skipped: the model does not fit in available GPU memory on this " +
+                  `machine. Reported: ${detail}`;
+                console.log(
+                  `[SKIP] model ${model.primary_tag}: exceeds available GPU memory`,
+                );
+              } else {
+                record.status = "failed";
+                record.detail = detail;
+                console.error(`[FAIL] model ${model.primary_tag}: ${record.detail}`);
+              }
             } finally {
               try {
                 const cleanup = await unloadHarnessOllamaModels(

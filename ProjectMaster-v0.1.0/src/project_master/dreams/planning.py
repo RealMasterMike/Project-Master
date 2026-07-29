@@ -69,6 +69,7 @@ class DreamCouncilPlan:
                 "prompt": self.request.prompt,
                 "context": self.request.context,
                 "run_id": self.request.run_id,
+                "automatic_purpose": self.request.automatic_purpose,
             },
             "role_angles": [item.to_dict() for item in self.role_angles],
             "source_refs": list(self.source_refs),
@@ -131,14 +132,20 @@ class DreamCouncilRequestBuilder:
             recipe_id=recipe.recipe_id,
             window_key=window_key,
             snapshot_id=snapshot.snapshot_id,
-            request=CouncilRequest(prompt=prompt, context=context, run_id=run_id),
+            request=CouncilRequest(
+                prompt=prompt,
+                context=context,
+                run_id=run_id,
+                automatic_purpose="dream",
+                triage=False,
+            ),
             role_angles=angles,
             source_refs=tuple(entry.source_id for entry in snapshot.entries),
         )
 
 
 class DreamCouncilRunner:
-    """Pass the complete physical-model catalog to the sequential advisory council."""
+    """Pass the refreshed catalog to the purpose-filtered sequential advisory council."""
 
     def __init__(self, council: SequentialCouncil) -> None:
         self.council = council
@@ -178,7 +185,7 @@ class DreamCouncilRunner:
     @staticmethod
     def _require_all_models(plan: DreamCouncilPlan) -> None:
         if not plan.use_all_conversational_models:
-            raise ValueError("Dream Lab plans must use the complete conversational model catalog")
+            raise ValueError("Dream Lab plans must use the complete eligible model catalog")
 
 
 def _merged_angles(overrides: tuple[RoleAngle, ...]) -> tuple[RoleAngle, ...]:

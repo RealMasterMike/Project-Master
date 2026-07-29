@@ -31,6 +31,7 @@ from project_master.integrations.voice.espeak import (
 )
 from project_master.integrations.voice.governor import GovernorVoiceLeaseProvider
 from project_master.integrations.voice.jobs import (
+    VOICE_RENDER_OWNER_PREFIX,
     InMemoryRenderJobRepository,
     RenderChunkStatus,
     RenderJob,
@@ -64,6 +65,7 @@ from project_master.integrations.voice.projects import (
     RenderSettings,
     ScriptBlock,
     VoiceProject,
+    VoiceWorkflowOrigin,
 )
 from project_master.integrations.voice.resources import (
     ResourceLease,
@@ -115,9 +117,11 @@ __all__ = [
     "VoiceChunkPlan",
     "VoiceProfile",
     "VoiceProject",
+    "VoiceWorkflowOrigin",
     "VoiceReference",
     "VoiceResourceRequest",
     "VoiceStudioService",
+    "VOICE_RENDER_OWNER_PREFIX",
     "build_chunk_plan",
     "chatterbox_python",
     "discover_chatterbox_pack",

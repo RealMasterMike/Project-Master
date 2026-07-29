@@ -75,6 +75,50 @@ def test_import_creates_deterministic_revision_and_rendered_copy() -> None:
     assert first.workflow["2"]["inputs"]["text"] == "original prompt"
 
 
+def test_schema_v2_binds_purpose_into_the_immutable_revision_digest() -> None:
+    general = WorkflowRevision.import_json(
+        "General",
+        api_workflow(),
+        bindings(),
+        purpose="general",
+    )
+    video = WorkflowRevision.import_json(
+        "Video",
+        api_workflow(),
+        bindings(),
+        purpose="video",
+    )
+
+    assert general.schema_version == 2
+    assert video.schema_version == 2
+    assert general.id == "comfy-wf-9558f9f8daa8ddaabb1609e1"
+    assert video.id == "comfy-wf-25c50c8a28de8327ce2f67cb"
+    assert general.id != video.id
+    assert video.purpose == "video"
+    assert WorkflowRevision.model_validate_json(video.model_dump_json()) == video
+
+
+def test_schema_v1_keeps_its_exact_legacy_digest_and_requires_general_purpose() -> None:
+    legacy = {
+        "schema_version": 1,
+        "id": "comfy-wf-9ac7a06b59d8f528f30cf687",
+        "name": "Legacy portrait",
+        "digest": "9ac7a06b59d8f528f30cf687445bb4d97e16483d42a205d1a1a575e1e72d3244",
+        "created_at": "2026-07-27T00:00:00Z",
+        "workflow": api_workflow(),
+        "bindings": [binding.model_dump(mode="json") for binding in bindings()],
+    }
+
+    restored = WorkflowRevision.model_validate(legacy)
+
+    assert restored.schema_version == 1
+    assert restored.purpose == "general"
+    assert restored.digest == legacy["digest"]
+
+    with pytest.raises(ValueError, match="must use the general purpose"):
+        WorkflowRevision.model_validate({**legacy, "purpose": "video"})
+
+
 def test_revision_detects_nested_content_mutation_before_rendering() -> None:
     revision = WorkflowRevision.import_json("Portrait", api_workflow(), bindings())
     revision.workflow["2"]["inputs"]["text"] = "mutated outside revision API"
@@ -96,6 +140,70 @@ def test_render_requires_known_typed_values_and_enforces_range() -> None:
         revision.render({"prompt": "test", "steps": 101})
     with pytest.raises(WorkflowValidationError, match="expected enum"):
         revision.render({"prompt": "test", "quality": "unknown.safetensors"})
+
+
+def test_image_asset_binding_only_accepts_project_media_ids() -> None:
+    asset_id = f"media-asset-{'a' * 32}"
+    revision = WorkflowRevision.import_json(
+        "Image input",
+        {
+            "1": {
+                "class_type": "LoadImage",
+                "inputs": {"image": "placeholder.png"},
+            }
+        },
+        (
+            WorkflowBinding(
+                id="source_image",
+                node_id="1",
+                input_name="image",
+                value_type="image_asset",
+            ),
+        ),
+    )
+
+    rendered = revision.render({"source_image": asset_id})
+
+    assert rendered["1"]["inputs"]["image"] == asset_id
+    with pytest.raises(WorkflowValidationError, match="expected image_asset"):
+        revision.render({"source_image": "/tmp/untrusted.png"})
+
+
+def test_image_asset_binding_must_target_load_image_image_input() -> None:
+    wrong_node = {
+        "1": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "placeholder"},
+        }
+    }
+    binding = WorkflowBinding(
+        id="source_image",
+        node_id="1",
+        input_name="text",
+        value_type="image_asset",
+    )
+
+    with pytest.raises(WorkflowValidationError, match=r"LoadImage\.image"):
+        WorkflowRevision.import_json("Wrong image target", wrong_node, (binding,))
+
+
+def test_image_asset_bindings_cannot_be_optional_or_have_defaults() -> None:
+    with pytest.raises(ValueError, match="must be required"):
+        WorkflowBinding(
+            id="source_image",
+            node_id="1",
+            input_name="image",
+            value_type="image_asset",
+            required=False,
+        )
+    with pytest.raises(ValueError, match="cannot declare a default"):
+        WorkflowBinding(
+            id="source_image",
+            node_id="1",
+            input_name="image",
+            value_type="image_asset",
+            default_value=f"media-asset-{'a' * 32}",
+        )
 
 
 def test_static_validation_rejects_editor_format_missing_links_and_cycles() -> None:

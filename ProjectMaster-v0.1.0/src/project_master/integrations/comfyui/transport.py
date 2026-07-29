@@ -22,13 +22,27 @@ from project_master.integrations.comfyui.security import (
     ComfySecurityError,
     join_api_url,
     validate_identifier,
+    validate_input_locator,
     validate_output_locator,
 )
 
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 _DEFAULT_MAX_OUTPUT_BYTES = 512 * 1024 * 1024
+MAX_COMFY_INPUT_IMAGE_BYTES = 50 * 1024 * 1024
+COMFY_INPUT_SUBFOLDER = "project-master"
 _MAX_OUTPUT_COUNT = 4_096
 _MAX_EVENT_BYTES = 256 * 1024
+_UPLOAD_IMAGE_MEDIA_TYPES = frozenset(
+    {
+        "image/avif",
+        "image/bmp",
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/tiff",
+        "image/webp",
+    }
+)
 _DOWNLOADABLE_CATEGORIES = frozenset(
     {
         "audio",
@@ -118,6 +132,25 @@ class OutputRef(BaseModel):
     def validate_locator(self) -> OutputRef:
         validate_output_locator(self.filename, self.subfolder, self.type)
         return self
+
+
+class InputRef(BaseModel):
+    """A validated ComfyUI input locator returned by `/upload/image`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    filename: str = Field(min_length=1, max_length=240)
+    subfolder: str = Field(min_length=1, max_length=1_024)
+    type: Literal["input"]
+
+    @model_validator(mode="after")
+    def validate_locator(self) -> InputRef:
+        validate_input_locator(self.filename, self.subfolder, self.type)
+        return self
+
+    @property
+    def relative_locator(self) -> str:
+        return f"{self.subfolder}/{self.filename}"
 
 
 class OutputMetadata(BaseModel):
@@ -228,6 +261,8 @@ class ComfyTransport(Protocol):
 
     async def queue(self) -> QueueSnapshot: ...
 
+    async def free_models_and_memory(self) -> None: ...
+
     async def submit_prompt(
         self,
         workflow: Mapping[str, Any],
@@ -239,6 +274,14 @@ class ComfyTransport(Protocol):
     async def history(self, prompt_id: str) -> HistoryResult: ...
 
     async def download_output(self, output: OutputMetadata) -> DownloadedOutput: ...
+
+    async def upload_image(
+        self,
+        content: bytes,
+        *,
+        filename: str,
+        media_type: str,
+    ) -> InputRef: ...
 
     async def delete_queue_items(self, prompt_ids: Sequence[str]) -> None: ...
 
@@ -262,6 +305,7 @@ class HttpxComfyTransport:
         event_source: WebSocketEventSource | None = None,
         client: httpx.AsyncClient | None = None,
         max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
+        max_input_image_bytes: int = MAX_COMFY_INPUT_IMAGE_BYTES,
     ) -> None:
         if (
             not isinstance(max_output_bytes, int)
@@ -269,10 +313,21 @@ class HttpxComfyTransport:
             or max_output_bytes < 1
         ):
             raise ValueError("ComfyUI output size limit must be a positive integer.")
+        if (
+            not isinstance(max_input_image_bytes, int)
+            or isinstance(max_input_image_bytes, bool)
+            or max_input_image_bytes < 1
+            or max_input_image_bytes > MAX_COMFY_INPUT_IMAGE_BYTES
+        ):
+            raise ValueError(
+                "ComfyUI input image size limit must be a positive integer no greater "
+                "than the official 50 MiB limit."
+            )
         self.profile = profile
         self._resolver = secret_resolver or EnvironmentSecretResolver()
         self._event_source = event_source
         self._max_output_bytes = max_output_bytes
+        self._max_input_image_bytes = max_input_image_bytes
         self._owns_client = client is None
         self._headers = profile.authentication_headers(self._resolver)
         if client is not None and client.follow_redirects:
@@ -297,6 +352,15 @@ class HttpxComfyTransport:
     async def queue(self) -> QueueSnapshot:
         payload = await self._request_json("GET", "queue")
         return parse_queue_snapshot(payload)
+
+    async def free_models_and_memory(self) -> None:
+        """Release ComfyUI's cached models and allocator memory through its official API."""
+        await self._request_json(
+            "POST",
+            "free",
+            json={"unload_models": True, "free_memory": True},
+            allow_empty=True,
+        )
 
     async def submit_prompt(
         self,
@@ -396,6 +460,76 @@ class HttpxComfyTransport:
             source_url=url,
             fetched_at=datetime.now(UTC),
         )
+
+    async def upload_image(
+        self,
+        content: bytes,
+        *,
+        filename: str,
+        media_type: str,
+    ) -> InputRef:
+        if not isinstance(content, (bytes, bytearray, memoryview)):
+            raise TypeError("ComfyUI input image content must be bytes.")
+        image = bytes(content)
+        if not image:
+            raise ValueError("ComfyUI input image cannot be empty.")
+        if len(image) > self._max_input_image_bytes:
+            raise ComfyProtocolError("ComfyUI input image exceeds the configured size limit.")
+        normalized_media_type = _normalize_media_type(media_type)
+        if normalized_media_type not in _UPLOAD_IMAGE_MEDIA_TYPES:
+            raise ValueError("ComfyUI input image media type is not permitted.")
+        validate_input_locator(filename, COMFY_INPUT_SUBFOLDER, "input")
+
+        url = join_api_url(self.profile.base_url, "upload/image")
+        request_options: dict[str, Any] = {
+            "data": {
+                "type": "input",
+                "subfolder": COMFY_INPUT_SUBFOLDER,
+                "overwrite": "false",
+            },
+            "files": {
+                "image": (
+                    filename,
+                    image,
+                    normalized_media_type,
+                )
+            },
+        }
+        if self._headers:
+            request_options["headers"] = self._headers
+        try:
+            response = await self._client.post(url, **request_options)
+        except httpx.HTTPError as exc:
+            raise ComfyTransportError(
+                f"ComfyUI input upload failed: {type(exc).__name__}."
+            ) from exc
+        if _url_origin(str(response.request.url)) != _url_origin(self.profile.base_url):
+            raise ComfySecurityError("ComfyUI input upload left the configured profile origin.")
+        if 300 <= response.status_code < 400:
+            raise ComfyTransportError("ComfyUI redirects are not permitted.")
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ComfyTransportError(f"ComfyUI returned HTTP {response.status_code}.") from exc
+        if len(response.content) > _MAX_JSON_BYTES:
+            raise ComfyProtocolError("ComfyUI JSON response exceeds the size limit.")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ComfyProtocolError("ComfyUI returned invalid upload JSON.") from exc
+        if not isinstance(payload, Mapping):
+            raise ComfyProtocolError("ComfyUI upload response must be an object.")
+        try:
+            uploaded = InputRef(
+                filename=payload.get("name"),
+                subfolder=payload.get("subfolder"),
+                type=payload.get("type"),
+            )
+        except ValueError as exc:
+            raise ComfyProtocolError("ComfyUI returned an unsafe input locator.") from exc
+        if uploaded.subfolder != COMFY_INPUT_SUBFOLDER:
+            raise ComfyProtocolError("ComfyUI returned an unexpected input subfolder.")
+        return uploaded
 
     async def delete_queue_items(self, prompt_ids: Sequence[str]) -> None:
         validated = [validate_identifier(item, "prompt ID") for item in prompt_ids]

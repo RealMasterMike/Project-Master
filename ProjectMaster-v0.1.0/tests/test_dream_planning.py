@@ -126,6 +126,8 @@ def test_dream_runner_passes_every_physical_model_to_sequential_council() -> Non
             size_bytes=12,
             capabilities=frozenset({"completion", "tools"}),
             details=ModelDetails(family="test"),
+            automatic_eligible=True,
+            curated_purposes=frozenset({"dream"}),
         ),
         CatalogModel(
             physical_id="digest:worker",
@@ -134,6 +136,8 @@ def test_dream_runner_passes_every_physical_model_to_sequential_council() -> Non
             size_bytes=7,
             capabilities=frozenset({"completion"}),
             details=ModelDetails(family="test"),
+            automatic_eligible=True,
+            curated_purposes=frozenset({"dream"}),
         ),
     ]
     recipe = DreamRecipe(
@@ -180,6 +184,8 @@ def test_dream_runner_forwards_cancellation_without_starting_a_model() -> None:
         size_bytes=12,
         capabilities=frozenset({"completion", "tools"}),
         details=ModelDetails(family="test"),
+        automatic_eligible=True,
+        curated_purposes=frozenset({"dream"}),
     )
     recipe = DreamRecipe(
         recipe_id="cancelled",

@@ -3,7 +3,6 @@ import {
   useEffect,
   useRef,
   useState,
-  type CSSProperties,
   type ChangeEvent,
   type FormEvent,
   type KeyboardEvent,
@@ -11,18 +10,26 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
+import { ChatImageAttachments } from "./components/ChatImageAttachments";
+import { ChatSessionToolbar } from "./components/ChatSessionToolbar";
 import { ConversationLibrary } from "./components/ConversationLibrary";
 import { FeatureWorkspace } from "./components/FeatureWorkspace";
-import { LayoutCustomizer } from "./components/LayoutCustomizer";
+import { CommunicationProfilePanel } from "./components/CommunicationProfilePanel";
 import { MissionView } from "./components/MissionView";
 import { RunRail, TeamStrip } from "./components/TeamRunPanel";
+import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { UpdateNotice } from "./components/UpdateNotice";
 import {
   WorkspaceNavigation,
   type MasterWorkspace,
 } from "./components/WorkspaceNavigation";
-import { useLayoutController } from "./hooks/useLayoutController";
-import { withCurrentMutationAuthorization } from "./lib/chatAuthorization";
+import {
+  SPEECH_SKIP_SECONDS,
+  SPEECH_SPEEDS,
+  useMessageSpeech,
+} from "./hooks/useMessageSpeech";
+import { useAppPreferences } from "./hooks/useAppPreferences";
+import { withCurrentToolAuthorization } from "./lib/chatAuthorization";
 import {
   cancelChat,
   ensureManagedBackend,
@@ -30,9 +37,14 @@ import {
   getCommunicationProfile,
   getConversation,
   getModelStatus,
+  isVisionCapableModel,
+  isCuratedTeamModel,
   isAbortError,
   listConversations,
+  listProjectMediaAssets,
   listProjects,
+  resolveModelSelection,
+  resolveVisionModelSelection,
   submitCommunicationFeedback,
   type CommunicationFeedbackCategory,
   type ProjectMasterChatMode,
@@ -42,6 +54,7 @@ import {
   type ProjectMasterRunActivity,
   type ProjectMasterTeamCatalogModel,
   type MasterProject,
+  type MediaAssetSummary,
   streamChat,
   type ProjectMasterModel,
 } from "./lib/projectMasterApi";
@@ -62,6 +75,8 @@ interface RetryRequest {
   message: string;
   mode: ProjectMasterChatMode;
   allowMutations: boolean;
+  allowWebSearch: boolean;
+  imageAssetIds: string[];
   projectId?: string;
   conversationId?: string;
 }
@@ -71,6 +86,9 @@ interface ActiveStream {
   requestId: string;
 }
 
+const FOLLOW_SCROLL_THRESHOLD_PX = 64;
+const MAX_CHAT_IMAGE_TOTAL_BYTES = 40 * 1024 * 1024;
+
 let nextMessageId = 0;
 
 function createMessageId(role: UiMessage["role"]): string {
@@ -79,7 +97,7 @@ function createMessageId(role: UiMessage["role"]): string {
 }
 
 function App() {
-  const layoutController = useLayoutController();
+  const appPreferences = useAppPreferences();
   const [models, setModels] = useState<ProjectMasterModel[]>([]);
   const [binderProjects, setBinderProjects] = useState<MasterProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -87,6 +105,7 @@ function App() {
   const [chatMode, setChatMode] = useState<ProjectMasterChatMode>("team");
   // Deliberately session-only: never read from or write to persistent storage.
   const [allowMutations, setAllowMutations] = useState(false);
+  const [allowWebSearch, setAllowWebSearch] = useState(false);
   const [teamAvailable, setTeamAvailable] = useState(false);
   const [runActivities, setRunActivities] = useState<ProjectMasterRunActivity[]>([]);
   const [activeRunId, setActiveRunId] = useState<string>();
@@ -101,22 +120,75 @@ function App() {
     useState<ProjectMasterCommunicationProfile | null>(null);
   const [communicationLoading, setCommunicationLoading] = useState(false);
   const [communicationError, setCommunicationError] = useState<string | null>(null);
-  const [contextLength, setContextLength] = useState(32768);
+  const [contextLength, setContextLength] = useState(65536);
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("checking");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [composer, setComposer] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [followingOutput, setFollowingOutput] = useState(true);
+  const [runRailOpen, setRunRailOpen] = useState(false);
+  const [projectImages, setProjectImages] = useState<MediaAssetSummary[]>([]);
+  const [selectedChatImages, setSelectedChatImages] = useState<
+    MediaAssetSummary[]
+  >([]);
+  const [projectImagesLoading, setProjectImagesLoading] = useState(false);
+  const [projectImagesError, setProjectImagesError] = useState<string | null>(
+    null,
+  );
+  const [imageSelectionError, setImageSelectionError] = useState<string | null>(
+    null,
+  );
 
   const modelLoadControllerRef = useRef<AbortController | null>(null);
+  const projectImagesControllerRef = useRef<AbortController | null>(null);
   const conversationListControllerRef = useRef<AbortController | null>(null);
   const conversationLoadControllerRef = useRef<AbortController | null>(null);
   const communicationLoadControllerRef = useRef<AbortController | null>(null);
   const streamControllerRef = useRef<ActiveStream | null>(null);
   const retryRequestsRef = useRef(new Map<string, RetryRequest>());
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const followOutputRef = useRef(true);
+  const speech = useMessageSpeech(
+    activeWorkspace === "chat" && connectionState === "ready",
+  );
+  const autoSpokenRef = useRef<string | null>(null);
+  const speakRef = useRef(speech.speak);
+  speakRef.current = speech.speak;
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const selectedProject = binderProjects.find(
+    (project) => project.id === selectedProjectId,
+  );
+  const automaticVisionModel = resolveVisionModelSelection(
+    models,
+    appPreferences.preferredVisionModel,
+  );
+  const teamLeadModel =
+    models.find(
+      (model) =>
+        model.name === selectedModel && isCuratedTeamModel(model),
+    )?.name ??
+    models.find(isCuratedTeamModel)?.name ??
+    "";
+  const activeChatModel =
+    chatMode === "team" ? teamLeadModel : selectedModel;
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.density = appPreferences.interfaceDensity;
+    root.dataset.textScale = appPreferences.textScale;
+    root.dataset.motion = appPreferences.motion;
+    return () => {
+      delete root.dataset.density;
+      delete root.dataset.textScale;
+      delete root.dataset.motion;
+    };
+  }, [
+    appPreferences.interfaceDensity,
+    appPreferences.motion,
+    appPreferences.textScale,
+  ]);
 
   const loadConversations = useCallback(async () => {
     conversationListControllerRef.current?.abort();
@@ -201,18 +273,13 @@ function App() {
       }
 
       setModels(availableModels);
-      setSelectedModel((currentModel) => {
-        if (
-          conversationalModels.some((model) => model.name === currentModel)
-        ) {
-          return currentModel;
-        }
-        return conversationalModels.some(
-          (model) => model.name === status.configuredModel,
-        )
-          ? status.configuredModel
-          : conversationalModels[0]?.name ?? "";
-      });
+      setSelectedModel((currentModel) =>
+        resolveModelSelection(
+          availableModels,
+          currentModel,
+          status.recommendedModel,
+        ),
+      );
       setContextLength(status.contextLength);
       setTeamCatalog(status.teamCatalog);
       setTeamAvailable(status.teamAvailable);
@@ -248,6 +315,49 @@ function App() {
     }
   }, []);
 
+  const loadProjectImages = useCallback(async () => {
+    projectImagesControllerRef.current?.abort();
+    setProjectImages([]);
+    setProjectImagesError(null);
+    if (
+      connectionState !== "ready" ||
+      !selectedProject ||
+      selectedProject.projectType !== "creator"
+    ) {
+      setProjectImagesLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    projectImagesControllerRef.current = controller;
+    setProjectImagesLoading(true);
+    try {
+      const assets = await listProjectMediaAssets(
+        selectedProject.id,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setProjectImages(
+        assets.filter(
+          (asset) =>
+            asset.kind === "image" &&
+            asset.width !== undefined &&
+            asset.height !== undefined &&
+            asset.sizeBytes <= 20 * 1024 * 1024,
+        ),
+      );
+    } catch (error) {
+      if (!controller.signal.aborted && !isAbortError(error)) {
+        setProjectImagesError(formatProjectMasterError(error));
+      }
+    } finally {
+      if (projectImagesControllerRef.current === controller) {
+        projectImagesControllerRef.current = null;
+        setProjectImagesLoading(false);
+      }
+    }
+  }, [connectionState, selectedProject]);
+
   useEffect(() => {
     void loadAvailableModels();
 
@@ -256,8 +366,19 @@ function App() {
       conversationListControllerRef.current?.abort();
       conversationLoadControllerRef.current?.abort();
       communicationLoadControllerRef.current?.abort();
+      projectImagesControllerRef.current?.abort();
     };
   }, [loadAvailableModels]);
+
+  useEffect(() => {
+    setSelectedChatImages([]);
+    setImageSelectionError(null);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    void loadProjectImages();
+    return () => projectImagesControllerRef.current?.abort();
+  }, [loadProjectImages]);
 
   useEffect(() => {
     if (connectionState !== "ready") return;
@@ -285,12 +406,60 @@ function App() {
     };
   }, []);
 
+  // Follow new output only while the reader is already at the bottom, so
+  // scrolling up to re-read earlier output is not yanked back mid-stream.
   useEffect(() => {
     const messageList = messageListRef.current;
-    if (messageList) {
+    if (!messageList) return;
+    const onScroll = () => {
+      const distanceFromBottom =
+        messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight;
+      const shouldFollow =
+        distanceFromBottom <= FOLLOW_SCROLL_THRESHOLD_PX;
+      followOutputRef.current = shouldFollow;
+      setFollowingOutput(shouldFollow);
+    };
+    messageList.addEventListener("scroll", onScroll, { passive: true });
+    return () => messageList.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const messageList = messageListRef.current;
+    if (messageList && messages.length > 0 && followOutputRef.current) {
       messageList.scrollTop = messageList.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, runActivities, teamView]);
+
+  function scrollToLatest(): void {
+    const messageList = messageListRef.current;
+    if (!messageList) return;
+    messageList.scrollTo({
+      top: messageList.scrollHeight,
+      behavior: "smooth",
+    });
+    followOutputRef.current = true;
+    setFollowingOutput(true);
+  }
+
+  // Auto-speak fires once per finished response. Keyed on message id so
+  // streaming tokens cannot retrigger it mid-answer.
+  useEffect(() => {
+    if (!speech.autoSpeak || !speech.available) return;
+    const latest = messages[messages.length - 1];
+    if (
+      !latest ||
+      latest.role !== "assistant" ||
+      latest.status !== "complete" ||
+      !latest.content.trim() ||
+      autoSpokenRef.current === latest.id
+    ) {
+      return;
+    }
+    autoSpokenRef.current = latest.id;
+    void speakRef.current(latest.id, latest.content);
+    // speech.speak is read through a ref so this only reacts to new messages;
+    // the hook returns a fresh object each render.
+  }, [messages, speech.autoSpeak, speech.available]);
 
   async function runAssistantResponse(
     assistantId: string,
@@ -317,6 +486,8 @@ function App() {
         message: request.message,
         mode: request.mode,
         allowMutations: request.allowMutations,
+        allowWebSearch: request.allowWebSearch,
+        imageAssetIds: request.imageAssetIds,
         projectId: request.projectId,
         conversationId: request.conversationId,
         signal: controller.signal,
@@ -391,9 +562,38 @@ function App() {
     });
   }
 
+  function addChatImage(assetId: string): void {
+    const asset = projectImages.find((item) => item.id === assetId);
+    if (!asset || selectedChatImages.some((item) => item.id === assetId)) return;
+    if (!automaticVisionModel) {
+      setImageSelectionError(
+        "Choose an installed vision model in Settings before attaching an image.",
+      );
+      return;
+    }
+    const totalBytes =
+      selectedChatImages.reduce((total, item) => total + item.sizeBytes, 0) +
+      asset.sizeBytes;
+    if (totalBytes > MAX_CHAT_IMAGE_TOTAL_BYTES) {
+      setImageSelectionError("Selected images must total 40 MiB or less.");
+      return;
+    }
+    setImageSelectionError(null);
+    setChatMode("direct");
+    setSelectedModel(automaticVisionModel);
+    setSelectedChatImages((current) => [...current, asset].slice(0, 3));
+  }
+
+  function removeChatImage(assetId: string): void {
+    setImageSelectionError(null);
+    setSelectedChatImages((current) =>
+      current.filter((asset) => asset.id !== assetId),
+    );
+  }
+
   function submitMessage(): void {
     const content = composer.trim();
-    if (!content || !selectedModel || isStreaming) {
+    if (!content || !activeChatModel || isStreaming) {
       return;
     }
 
@@ -410,10 +610,12 @@ function App() {
       status: "streaming",
     };
     const request: RetryRequest = {
-      model: selectedModel,
+      model: activeChatModel,
       message: content,
       mode: chatMode,
       allowMutations,
+      allowWebSearch,
+      imageAssetIds: selectedChatImages.map((asset) => asset.id),
       projectId: selectedProjectId || undefined,
       conversationId,
     };
@@ -421,12 +623,16 @@ function App() {
     setRunActivities([]);
     setActiveRunId(undefined);
     if (chatMode === "team") setTeamView("mission");
+    followOutputRef.current = true;
+    setFollowingOutput(true);
     setMessages((currentMessages) => [
       ...currentMessages,
       userMessage,
       assistantMessage,
     ]);
     setComposer("");
+    setSelectedChatImages([]);
+    setImageSelectionError(null);
     resetComposerHeight();
     void runAssistantResponse(assistantMessage.id, request);
   }
@@ -471,13 +677,19 @@ function App() {
     setRunActivities([]);
     setActiveRunId(undefined);
     setComposer("");
+    setSelectedChatImages([]);
+    setImageSelectionError(null);
     setAllowMutations(false);
+    setAllowWebSearch(false);
+    followOutputRef.current = true;
+    setFollowingOutput(true);
     resetComposerHeight();
   }
 
   async function openConversation(id: string): Promise<void> {
     if (isStreaming || id === conversationId) return;
     setAllowMutations(false);
+    setAllowWebSearch(false);
     conversationLoadControllerRef.current?.abort();
     const controller = new AbortController();
     conversationLoadControllerRef.current = controller;
@@ -488,8 +700,12 @@ function App() {
       const conversation = await getConversation(id, controller.signal);
       if (controller.signal.aborted) return;
       setConversationId(conversation.id);
+      setSelectedChatImages([]);
+      setImageSelectionError(null);
       setRunActivities([]);
       setActiveRunId(undefined);
+      followOutputRef.current = true;
+      setFollowingOutput(true);
       setMessages(
         conversation.messages.map((message) => ({
           id: createMessageId(message.role),
@@ -522,7 +738,10 @@ function App() {
         await ensureManagedBackend();
         await runAssistantResponse(
           messageId,
-          withCurrentMutationAuthorization(request, allowMutations),
+          withCurrentToolAuthorization(request, {
+            allowMutations,
+            allowWebSearch,
+          }),
         );
       } catch (error) {
         const displayError = formatProjectMasterError(error);
@@ -539,7 +758,7 @@ function App() {
   }
 
   const selectedModelInfo = models.find(
-    (model) => model.name === selectedModel,
+    (model) => model.name === activeChatModel,
   );
   const lastUserMessage = [...messages]
     .reverse()
@@ -552,10 +771,15 @@ function App() {
     messages.length > 0 &&
     (isStreaming || runActivities.length > 0 || Boolean(activeRunId));
   const showMission = missionAvailable && teamView === "mission";
+  const runRailAvailable =
+    chatMode === "team" || runActivities.length > 0;
+  const latestRunActivity = runActivities[runActivities.length - 1];
   const canSend = Boolean(
     composer.trim() &&
-      selectedModel &&
+      activeChatModel &&
       selectedModelInfo?.conversational &&
+      (selectedChatImages.length === 0 ||
+        isVisionCapableModel(selectedModelInfo)) &&
       !isStreaming,
   );
   const connectionLabel =
@@ -577,16 +801,17 @@ function App() {
           ? "Install or select a chat-capable Ollama model"
           : "Install an Ollama model to begin"
         : "Message MASTER";
-  const chatLayout = layoutController.layout.panels.chat_panel;
-  const customizerLayout = layoutController.layout.panels.customize_panel;
-  const workspaceStyle = {
-    "--chat-content-width": `${chatLayout.width}%`,
-    "--customizer-width": `${customizerLayout.width}px`,
-  } as CSSProperties;
-
   return (
     <main className="app-shell">
       <header className="app-header">
+        <WorkspaceNavigation
+          active={activeWorkspace}
+          disabled={isStreaming}
+          connectionState={connectionState}
+          modelCount={models.length}
+          onChange={setActiveWorkspace}
+        />
+
         <div className="brand-lockup" aria-label="Project Master AI">
           <img
             className="brand-emblem"
@@ -599,7 +824,7 @@ function App() {
           </span>
         </div>
 
-        <div className="header-controls">
+        <div className="header-status">
           <span
             className={`connection-status connection-status--${connectionState}`}
             role="status"
@@ -607,158 +832,14 @@ function App() {
             <span className="connection-dot" aria-hidden="true" />
             {connectionLabel}
           </span>
-
-          <div className="mode-control" aria-label="Chat mode">
-            <button
-              className={chatMode === "direct" ? "is-active" : undefined}
-              type="button"
-              aria-pressed={chatMode === "direct"}
-              onClick={() => setChatMode("direct")}
-              disabled={isStreaming || activeWorkspace !== "chat"}
-            >
-              Direct
-            </button>
-            <button
-              className={chatMode === "team" ? "is-active" : undefined}
-              type="button"
-              aria-pressed={chatMode === "team"}
-              title={
-                teamAvailable
-                  ? "Use the local model council and one authorized lead"
-                  : "The backend did not report a compatible team catalog"
-              }
-              onClick={() => setChatMode("team")}
-              disabled={!teamAvailable || isStreaming || activeWorkspace !== "chat"}
-            >
-              Team
-            </button>
-          </div>
-
-          <label
-            className={`mutation-control ${allowMutations ? "is-enabled" : ""}`}
-            title="This applies only to chat tool calls in the current conversation. Dashboard actions remain explicit."
-          >
-            <input
-              type="checkbox"
-              checked={allowMutations}
-              onChange={(event) =>
-                setAllowMutations(event.currentTarget.checked)
-              }
-              disabled={isStreaming || activeWorkspace !== "chat"}
-            />
-            <span>
-              {allowMutations ? "Allow project changes" : "Read only"}
-            </span>
-          </label>
-
-          <label className="model-control binder-control" htmlFor="binder-select">
-            <span>Binder</span>
-            <select
-              id="binder-select"
-              value={selectedProjectId}
-              onChange={(event) => setSelectedProjectId(event.currentTarget.value)}
-              disabled={connectionState !== "ready" || isStreaming}
-              title="Attach indexed Project Binder context to chat"
-            >
-              <option value="">No project context</option>
-              {binderProjects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="model-control" htmlFor="model-select">
-            <span>{chatMode === "team" ? "Lead" : "Model"}</span>
-            <select
-              id="model-select"
-              value={selectedModel}
-              onChange={(event) => setSelectedModel(event.currentTarget.value)}
-              disabled={connectionState !== "ready" || isStreaming}
-            >
-              {models.length === 0 ? (
-                <option value="">No models available</option>
-              ) : (
-                models.map((model) => (
-                  <option
-                    key={model.name}
-                    value={model.name}
-                    disabled={!model.conversational}
-                  >
-                    {model.name} —{" "}
-                    {!model.conversational
-                      ? "not chat-compatible"
-                      : model.toolCapable
-                        ? "chat + tools"
-                        : model.capabilities.length
-                          ? "chat only"
-                          : "chat · capabilities unreported"}
-                  </option>
-                ))
-              )}
-            </select>
-            {selectedModelInfo ? (
-              <small className="model-readiness">
-                {selectedModelInfo.toolCapable
-                  ? "Tool-capable"
-                  : "Completion-only; tool requests may not execute in Direct mode"}
-                {selectedModelInfo.capabilities.length
-                  ? ` · ${selectedModelInfo.capabilities.join(", ")}`
-                  : " · Ollama did not report capabilities"}
-              </small>
-            ) : null}
-          </label>
-
-          <button
-            className="button button--secondary button--customize"
-            type="button"
-            aria-expanded={
-              activeWorkspace === "chat" && customizerLayout.visible
-            }
-            aria-controls="layout-customizer"
-            onClick={() => {
-              const nextVisible =
-                activeWorkspace === "chat"
-                  ? !customizerLayout.visible
-                  : true;
-              setActiveWorkspace("chat");
-              layoutController.applyOperations([
-                {
-                  operation: "set_visibility",
-                  target: "customize_panel",
-                  value: nextVisible,
-                },
-              ]);
-            }}
-          >
-            Customize
-          </button>
-
-          {isStreaming ? (
-            <button
-              className="button button--stop"
-              type="button"
-              onClick={stopStreaming}
-            >
-              Stop
-            </button>
-          ) : null}
         </div>
       </header>
 
       <UpdateNotice isBusy={isStreaming} />
 
-      <WorkspaceNavigation
-        active={activeWorkspace}
-        disabled={isStreaming}
-        onChange={setActiveWorkspace}
-      />
-
       {activeWorkspace === "chat" ? (
       <div
-        className={`workspace-shell ${chatMode === "team" ? "workspace-shell--team" : ""}`}
-        style={workspaceStyle}
+        className={`workspace-shell ${runRailAvailable ? "workspace-shell--team" : ""}`}
       >
         <ConversationLibrary
           conversations={conversations}
@@ -770,11 +851,34 @@ function App() {
           onOpenConversation={(id) => void openConversation(id)}
           onRetry={() => void loadConversations()}
         />
-        <section
-          className="message-list"
-          ref={messageListRef}
-          aria-label="Conversation"
-        >
+        <div className="conversation-column">
+          <ChatSessionToolbar
+            mode={chatMode}
+            onModeChange={setChatMode}
+            teamAvailable={teamAvailable}
+            models={models}
+            selectedModel={activeChatModel}
+            onModelChange={setSelectedModel}
+            projects={binderProjects}
+            selectedProjectId={selectedProjectId}
+            onProjectChange={setSelectedProjectId}
+            allowMutations={allowMutations}
+            onAllowMutationsChange={setAllowMutations}
+            allowWebSearch={allowWebSearch}
+            onAllowWebSearchChange={setAllowWebSearch}
+            requiresVision={selectedChatImages.length > 0}
+            isBusy={isStreaming || connectionState !== "ready"}
+            activityCount={runActivities.length}
+            railAvailable={runRailAvailable}
+            railOpen={runRailOpen}
+            onToggleRail={() => setRunRailOpen((current) => !current)}
+          />
+          <div className="transcript-shell">
+            <section
+              className="message-list"
+              ref={messageListRef}
+              aria-label="Conversation"
+            >
         {chatMode === "team" ? (
           <TeamStrip
             available={teamAvailable}
@@ -782,6 +886,20 @@ function App() {
             runId={activeRunId}
             isStreaming={isStreaming}
           />
+        ) : null}
+        {runRailAvailable ? (
+          <span
+            className="visually-hidden"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {latestRunActivity
+              ? `${latestRunActivity.kind.replace(/_/g, " ")}: ${latestRunActivity.message}`
+              : isStreaming
+                ? "Team run started."
+                : "Team activity is ready."}
+          </span>
         ) : null}
         {missionAvailable ? (
           <div className="mission-toggle" aria-label="Team run view">
@@ -861,8 +979,10 @@ function App() {
               engine preserves the conversation, memory, tools, and evidence.
             </p>
             <div className="creator-mark">
-              <img src="/brand/mm-heritage.jpg" alt="MM creator mark" />
-              <span>MM // CREATOR MARK</span>
+              <span className="creator-mark__monogram" aria-hidden="true">
+                MM
+              </span>
+              <span>CREATED BY MASTER MIKE</span>
             </div>
           </div>
         ) : showMission ? (
@@ -879,9 +999,54 @@ function App() {
                 ? () => void retryMessage(lastAssistantMessage.id)
                 : undefined
             }
+            deliveryAction={
+              lastAssistantMessage &&
+              speech.available &&
+              lastAssistantMessage.content &&
+              lastAssistantMessage.status !== "streaming" ? (
+                <button
+                  className="message-speak"
+                  type="button"
+                  aria-label={
+                    speech.pendingId === lastAssistantMessage.id
+                      ? "Cancel speech rendering for this message"
+                      : speech.speakingId === lastAssistantMessage.id
+                      ? "Stop speaking this message"
+                      : "Speak this message"
+                  }
+                  aria-pressed={
+                    speech.speakingId === lastAssistantMessage.id ||
+                    speech.pendingId === lastAssistantMessage.id
+                  }
+                  disabled={
+                    speech.pendingId !== null &&
+                    speech.pendingId !== lastAssistantMessage.id
+                  }
+                  onClick={() =>
+                    speech.speakingId === lastAssistantMessage.id ||
+                    speech.pendingId === lastAssistantMessage.id
+                      ? speech.stop()
+                      : void speech.speak(
+                          lastAssistantMessage.id,
+                          lastAssistantMessage.content,
+                        )
+                  }
+                >
+                  {speech.pendingId === lastAssistantMessage.id
+                    ? "Cancel render"
+                    : speech.speakingId === lastAssistantMessage.id
+                      ? "■ Stop"
+                      : "▶ Speak"}
+                </button>
+              ) : null
+            }
           />
         ) : (
-          <div className="message-stack" role="log" aria-live="polite">
+          <div
+            className="message-stack"
+            role="log"
+            aria-live={isStreaming ? "off" : "polite"}
+          >
             {messages.map((message) => (
               <article
                 className={`message-row message-row--${message.role}`}
@@ -891,6 +1056,42 @@ function App() {
                   <span>{message.role === "user" ? "YOU" : "MASTER"}</span>
                   {message.status === "streaming" ? <span>STREAMING</span> : null}
                   {message.status === "stopped" ? <span>STOPPED</span> : null}
+                  {message.role === "assistant" &&
+                  speech.available &&
+                  message.content &&
+                  message.status !== "streaming" ? (
+                    <button
+                      className="message-speak"
+                      type="button"
+                      aria-label={
+                        speech.pendingId === message.id
+                          ? "Cancel speech rendering for this message"
+                          : speech.speakingId === message.id
+                          ? "Stop speaking this message"
+                          : "Speak this message"
+                      }
+                      aria-pressed={
+                        speech.speakingId === message.id ||
+                        speech.pendingId === message.id
+                      }
+                      disabled={
+                        speech.pendingId !== null &&
+                        speech.pendingId !== message.id
+                      }
+                      onClick={() =>
+                        speech.speakingId === message.id ||
+                        speech.pendingId === message.id
+                          ? speech.stop()
+                          : void speech.speak(message.id, message.content)
+                      }
+                    >
+                      {speech.pendingId === message.id
+                        ? "Cancel render"
+                        : speech.speakingId === message.id
+                          ? "■ Stop"
+                          : "▶ Speak"}
+                    </button>
+                  ) : null}
                 </div>
 
                 <div className="message-content">
@@ -930,9 +1131,186 @@ function App() {
             ))}
           </div>
         )}
-        </section>
+            </section>
+            {!followingOutput && messages.length ? (
+              <button
+                className="follow-output-button"
+                type="button"
+                onClick={scrollToLatest}
+              >
+                Jump to latest
+                <span aria-hidden="true">↓</span>
+              </button>
+            ) : null}
+          </div>
 
-        {chatMode === "team" || runActivities.length > 0 ? (
+          <footer className="composer-shell">
+            {selectedProject?.projectType === "creator" ? (
+              <ChatImageAttachments
+                availableImages={projectImages}
+                selectedImages={selectedChatImages}
+                isLoading={projectImagesLoading}
+                error={projectImagesError}
+                selectionError={imageSelectionError}
+                disabled={isStreaming || connectionState !== "ready"}
+                visionModelAvailable={Boolean(automaticVisionModel)}
+                onAdd={addChatImage}
+                onRemove={removeChatImage}
+                onRetry={() => void loadProjectImages()}
+              />
+            ) : null}
+            <form className="composer" onSubmit={handleSubmit}>
+              <textarea
+                ref={composerRef}
+                value={composer}
+                rows={1}
+                onChange={handleComposerChange}
+                onKeyDown={handleComposerKeyDown}
+                placeholder={composerPlaceholder}
+                aria-label="Message MASTER"
+                disabled={connectionState !== "ready" || isStreaming}
+              />
+              {isStreaming ? (
+                <button
+                  className="button button--stop send-button"
+                  type="button"
+                  onClick={stopStreaming}
+                >
+                  Stop
+                </button>
+              ) : (
+                <button
+                  className="button button--primary send-button"
+                  type="submit"
+                  disabled={!canSend}
+                >
+                  Send
+                </button>
+              )}
+            </form>
+            {speech.available ? (
+              <div className="speech-bar">
+                <span className="speech-bar__label">READ ALOUD</span>
+                <label className="speech-voice" htmlFor="speech-voice-select">
+                  <span>Voice</span>
+                  <select
+                    id="speech-voice-select"
+                    value={speech.voiceId}
+                    onChange={(event) =>
+                      speech.setVoiceId(event.currentTarget.value)
+                    }
+                    title="Voice used to speak messages"
+                  >
+                    {speech.voices.map((voice) => (
+                      <option key={voice.id} value={voice.id}>
+                        {voice.name}
+                        {voice.mode === "reference"
+                          ? " — cloned"
+                          : " — designed"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label
+                  className={`speech-auto ${
+                    speech.autoSpeak ? "is-enabled" : ""
+                  }`}
+                  title="Speak each response automatically as it finishes"
+                >
+                  <input
+                    type="checkbox"
+                    checked={speech.autoSpeak}
+                    onChange={(event) =>
+                      speech.setAutoSpeak(event.currentTarget.checked)
+                    }
+                  />
+                  <span>
+                    {speech.autoSpeak ? "Auto-speak on" : "Auto-speak off"}
+                  </span>
+                </label>
+                <label className="speech-speed" htmlFor="speech-speed-select">
+                  <span>Speed</span>
+                  <select
+                    id="speech-speed-select"
+                    value={String(speech.speed)}
+                    onChange={(event) =>
+                      speech.setSpeed(Number(event.currentTarget.value))
+                    }
+                    title="Playback speed"
+                  >
+                    {SPEECH_SPEEDS.map((rate) => (
+                      <option key={rate} value={String(rate)}>
+                        {rate}×
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {speech.speakingId ? (
+                  <span className="speech-transport">
+                    <button
+                      type="button"
+                      aria-label={`Rewind ${SPEECH_SKIP_SECONDS} seconds`}
+                      onClick={() => speech.seekBy(-SPEECH_SKIP_SECONDS)}
+                    >
+                      −{SPEECH_SKIP_SECONDS}s
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Skip forward ${SPEECH_SKIP_SECONDS} seconds`}
+                      onClick={() => speech.seekBy(SPEECH_SKIP_SECONDS)}
+                    >
+                      +{SPEECH_SKIP_SECONDS}s
+                    </button>
+                  </span>
+                ) : null}
+                {speech.speakingId || speech.pendingId ? (
+                  <button
+                    className="speech-stop"
+                    type="button"
+                    onClick={speech.stop}
+                  >
+                    Stop audio
+                  </button>
+                ) : null}
+                {speech.error ? (
+                  <span className="speech-error" role="alert">
+                    {speech.error}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="composer-hint">
+              <span
+                className={`composer-safety ${
+                  allowMutations ? "is-enabled" : ""
+                }`}
+                role="status"
+              >
+                {allowMutations ? "CHANGES ALLOWED" : "READ ONLY"}
+              </span>
+              <span
+                className={`composer-safety ${
+                  allowWebSearch ? "is-enabled" : ""
+                }`}
+                role="status"
+              >
+                {allowWebSearch ? "ONLINE SEARCH ON" : "LOCAL ONLY"}
+              </span>
+              <span>
+                {chatMode === "team"
+                  ? "Local model team · one tool lead"
+                  : "Direct model"}
+              </span>
+              <span>
+                {selectedProjectId ? "Binder attached" : "No Binder"}
+              </span>
+              <span>Enter to send · Shift+Enter for a new line</span>
+              <span>{contextLength.toLocaleString()} tokens</span>
+            </div>
+          </footer>
+        </div>
+
+        {runRailAvailable ? (
           <RunRail
             activities={runActivities}
             runId={activeRunId}
@@ -941,81 +1319,49 @@ function App() {
               setRunActivities([]);
               setActiveRunId(undefined);
             }}
+            open={runRailOpen}
+            onClose={() => setRunRailOpen(false)}
           />
         ) : null}
 
-        {customizerLayout.visible ? (
-          <div id="layout-customizer">
-            <LayoutCustomizer
-              layout={layoutController.layout}
-              canUndo={layoutController.canUndo}
-              savedLayouts={layoutController.savedLayouts}
-              onApplyOperations={layoutController.applyOperations}
-              onUndo={layoutController.undo}
-              onReset={layoutController.reset}
-              onSave={layoutController.saveCurrent}
-              onApplySaved={layoutController.applySaved}
-              onDeleteSaved={layoutController.deleteSaved}
-              communicationProfile={communicationProfile}
-              communicationLoading={communicationLoading}
-              communicationError={communicationError}
-              onRefreshCommunication={() => void loadCommunicationProfile()}
-              onSubmitCommunicationFeedback={recordCommunicationFeedback}
-            />
-          </div>
-        ) : null}
       </div>
       ) : (
-        <FeatureWorkspace
-          workspace={activeWorkspace}
-          onReturnToCommand={() => setActiveWorkspace("chat")}
-          selectedProjectId={selectedProjectId}
-          onSelectProject={setSelectedProjectId}
-          onProjectsChange={setBinderProjects}
-        />
-      )}
-
-      {activeWorkspace === "chat" ? (
-      <footer className="composer-shell">
-        <form className="composer" onSubmit={handleSubmit}>
-          <textarea
-            ref={composerRef}
-            value={composer}
-            rows={1}
-            onChange={handleComposerChange}
-            onKeyDown={handleComposerKeyDown}
-            placeholder={composerPlaceholder}
-            aria-label="Message MASTER"
-            disabled={connectionState !== "ready" || isStreaming}
-          />
-          <button
-            className="button button--primary send-button"
-            type="submit"
-            disabled={!canSend}
-          >
-            Send
-          </button>
-        </form>
-        <div className="composer-hint">
-          <span
-            className={`composer-safety ${allowMutations ? "is-enabled" : ""}`}
-            role="status"
-          >
-            CHAT TOOLS:{" "}
-            {allowMutations ? "PROJECT CHANGES ALLOWED" : "READ ONLY"}
-          </span>
-          <span>{chatMode === "team" ? "All compatible models · one tool lead" : "Single model"}</span>
-          <span>{selectedProjectId ? "Project Binder attached" : "No Binder context"}</span>
-          <span>Enter to send</span>
-          <span>Shift+Enter for a new line</span>
-          <span>{contextLength.toLocaleString()} token context</span>
+        <div className="workspace-page">
+          {activeWorkspace === "communication" ? (
+            <div className="communication-workspace">
+              <header className="communication-workspace__header">
+                <span className="panel-kicker">COMMUNICATION</span>
+                <h1>Make every response fit the conversation.</h1>
+                <p>
+                  Review local communication preferences and record precise
+                  corrections without turning subject matter into memory.
+                </p>
+              </header>
+              <CommunicationProfilePanel
+                profile={communicationProfile}
+                isLoading={communicationLoading}
+                error={communicationError}
+                onRefresh={() => void loadCommunicationProfile()}
+                onSubmitFeedback={recordCommunicationFeedback}
+              />
+            </div>
+          ) : activeWorkspace === "settings" ? (
+            <SettingsWorkspace isBusy={isStreaming} models={models} />
+          ) : (
+            <FeatureWorkspace
+              workspace={activeWorkspace}
+              selectedProjectId={selectedProjectId}
+              onSelectProject={setSelectedProjectId}
+              onProjectsChange={setBinderProjects}
+            />
+          )}
+          <footer className="workspace-footer">
+            <span>LOCAL-FIRST</span>
+            <span>
+              Not configured means no external connection or simulated data.
+            </span>
+          </footer>
         </div>
-      </footer>
-      ) : (
-        <footer className="workspace-footer">
-          <span>LOCAL-FIRST</span>
-          <span>Not configured means no external connection or simulated data.</span>
-        </footer>
       )}
     </main>
   );

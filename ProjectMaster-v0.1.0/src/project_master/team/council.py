@@ -112,7 +112,11 @@ class SequentialCouncil:
     ) -> Iterator[TeamActivityEvent]:
         run_id = request.run_id or uuid4().hex
         prompt, context, input_truncated = request.bounded(self.limits)
-        plan = self.role_assigner.assign(models, preferred_lead)
+        plan = self.role_assigner.assign(
+            models,
+            preferred_lead,
+            required_purpose=request.automatic_purpose,
+        )
         sequence = 0
 
         def event(
@@ -205,6 +209,79 @@ class SequentialCouncil:
                 worker=skipped,
             )
 
+        if active_workers and request.triage:
+            if _cancelled(cancellation):
+                result = self._cancelled_result(run_id, plan, worker_results)
+                yield event(
+                    ActivityKind.COUNCIL_CANCELLED,
+                    "Council cancelled before triage",
+                    result=result,
+                )
+                return
+            yield event(
+                ActivityKind.TRIAGE_STARTED,
+                "Lead is selecting which specialists this message needs",
+                member=plan.lead,
+            )
+            selected_roles = self._triage(plan.lead, prompt, context, active_workers, cancellation)
+            if _cancelled(cancellation):
+                result = self._cancelled_result(run_id, plan, worker_results)
+                yield event(
+                    ActivityKind.COUNCIL_CANCELLED,
+                    "Council cancelled during triage",
+                    result=result,
+                )
+                return
+            if selected_roles is None:
+                yield event(
+                    ActivityKind.TRIAGE_COMPLETED,
+                    "Triage was inconclusive — running the full specialist council",
+                    member=plan.lead,
+                )
+            else:
+                kept = [m for m in active_workers if m.role in selected_roles]
+                dropped = [m for m in active_workers if m.role not in selected_roles]
+                for member in dropped:
+                    worker_results.append(
+                        WorkerResult(
+                            member=member,
+                            status=WorkerStatus.SKIPPED,
+                            failure=ProviderFailure(
+                                code="triage_skipped",
+                                message="Lead triage: not needed for this message.",
+                            ),
+                        )
+                    )
+                if kept:
+                    summary = ", ".join(m.role.value for m in kept)
+                    yield event(
+                        ActivityKind.TRIAGE_COMPLETED,
+                        f"Lead selected: {summary}"
+                        + (f" · skipped {len(dropped)}" if dropped else ""),
+                        member=plan.lead,
+                    )
+                else:
+                    yield event(
+                        ActivityKind.TRIAGE_COMPLETED,
+                        "No specialists needed — MASTER will respond directly",
+                        member=plan.lead,
+                    )
+                    result = CouncilResult(
+                        run_id=run_id,
+                        status=CouncilStatus.COMPLETE,
+                        final="",
+                        final_truncated=False,
+                        plan=plan,
+                        workers=tuple(worker_results),
+                    )
+                    yield event(
+                        ActivityKind.COUNCIL_COMPLETED,
+                        "Council complete — no specialists were needed",
+                        result=result,
+                    )
+                    return
+                active_workers = kept
+
         for member in active_workers:
             if _cancelled(cancellation):
                 result = self._cancelled_result(run_id, plan, worker_results)
@@ -285,7 +362,11 @@ class SequentialCouncil:
             return
 
         failed_workers = any(
-            item.status in {WorkerStatus.FAILED, WorkerStatus.SKIPPED}
+            item.status is WorkerStatus.FAILED
+            or (
+                item.status is WorkerStatus.SKIPPED
+                and (item.failure is None or item.failure.code != "triage_skipped")
+            )
             for item in worker_results
         )
         if synthesis.status is WorkerStatus.FAILED:
@@ -415,6 +496,53 @@ class SequentialCouncil:
             output=output,
             output_truncated=truncated,
         )
+
+    def _triage(
+        self,
+        lead: TeamMember,
+        prompt: str,
+        context: str,
+        candidates: Sequence[TeamMember],
+        cancellation: CancellationToken | None,
+    ) -> set[TeamRole] | None:
+        """Ask the lead which specialist roles this message needs.
+
+        Returns the selected roles (possibly empty for a direct response), or
+        None when the triage call failed or was unparseable — the caller then
+        falls back to running the full council, so triage can never lose work.
+        """
+        roles = sorted({member.role for member in candidates}, key=lambda role: role.value)
+        role_lines = "\n".join(f"- {role.value}: {_ROLE_BRIEFS[role]}" for role in roles)
+        system = (
+            "You route work inside a local multi-model council. Decide which "
+            "specialist roles would materially improve the answer to the user's "
+            "current message. Simple follow-ups, opinions about prior output, "
+            "clarifications, and conversational replies need no specialists. "
+            "Reserve specialists for substantial new work. Reply with only a "
+            "comma-separated subset of these role names, or the single word NONE:\n"
+            f"{role_lines}"
+        )
+        user = f"User message:\n{prompt}"
+        if context:
+            user += f"\n\nBounded context:\n{context}"
+        messages = [
+            Message(role="system", content=system),
+            Message(role="user", content=user),
+        ]
+        result = self._invoke_member(lead, messages, cancellation)
+        if result.status is not WorkerStatus.SUCCEEDED:
+            return None
+        text = result.output.lower()
+        selected = {
+            role
+            for role in roles
+            if re.search(rf"\b{re.escape(role.value)}\b", text)
+        }
+        if selected:
+            return selected
+        if re.search(r"\bnone\b", text):
+            return set()
+        return None
 
     @staticmethod
     def _worker_messages(

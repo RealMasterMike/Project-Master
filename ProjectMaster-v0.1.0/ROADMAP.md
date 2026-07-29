@@ -52,6 +52,35 @@ are included in v0.3.0.
 resource governance, cancellation, recovery, and proposal-only background work. Unattended parallel
 mutation remains out of scope.
 
+## Phase 4a — Resource awareness and model self-knowledge
+
+Planned 2026-07-29. Deterministic work that needs no GPU to build, and that exists largely to stop
+wasting a single 8 GB GPU.
+
+1. Generation queue with explicit GPU leases and a **run when the GPU is free** submit option
+2. VRAM fit preflight that distinguishes "never fits this hardware" from "does not fit right now"
+3. Storage and model manager exposing reverse references from curated workflows to model files
+4. Run ledger recording wall time, queue wait, VRAM high-water mark, and load/unload events
+5. Selectable thinking modes per purpose, replacing the currently hardcoded minimum-cost policy
+6. Per-model thinking capability matrix — none, boolean, levelled, forced, or unknown
+7. Model Interview: a free metadata pass plus an opt-in, lease-queued live capability pass
+
+**Status:** planned only. Items 1 to 4 came from failures and blockers recorded in the v0.4.0
+acceptance sweep. Interview evidence informs recommendations but never promotes a model to an
+automatic curated default; that still requires publisher documentation.
+
+## Phase 4b — Everyday surfaces
+
+Planned 2026-07-29. Small deterministic surfaces over data already stored. No GPU, no network, no
+new runtime dependency.
+
+1. Global search across projects, ideas, media, runs, chat, and approvals via SQLite full-text search
+2. Conversation, run, and Binder export to Markdown with provenance and secret redaction
+3. Project-scoped, revision-pinned prompt recipes
+4. Command palette reusing the existing workspace table and streaming lock
+
+**Status:** planned only.
+
 ## Phase 5 — Self-evaluation
 
 1. Independent verifier model

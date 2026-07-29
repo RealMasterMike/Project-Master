@@ -24,7 +24,7 @@ export type UpdateCheckResult =
   | { status: "current" }
   | { status: "available"; update: Update };
 
-function isTauriRuntime(): boolean {
+export function isAppUpdateRuntime(): boolean {
   return (
     typeof window !== "undefined" &&
     "__TAURI_INTERNALS__" in window
@@ -54,7 +54,7 @@ export async function checkForAppUpdate(
   force = false,
   now = Date.now(),
 ): Promise<UpdateCheckResult> {
-  if (!isTauriRuntime()) return { status: "unavailable" };
+  if (!isAppUpdateRuntime()) return { status: "unavailable" };
 
   if (
     !force &&

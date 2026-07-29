@@ -3,21 +3,14 @@ import {
   useEffect,
   useState,
   type FormEvent,
-  type ReactNode,
 } from "react";
 import {
-  cancelComfyJob,
   cancelVoiceJob,
-  createComfyJob,
   createProject,
   createVoiceJob,
   deleteDreamSchedule,
-  decideComfyWorkflow,
   decideDreamItem,
   formatProjectMasterError,
-  getComfyOverview,
-  getComfyArtifactContent,
-  getComfyProfileStatus,
   getDreamOverview,
   getProjectRuns,
   getRunDetail,
@@ -25,7 +18,6 @@ import {
   getVoiceEngineHealth,
   getVoiceArtifactContent,
   getVoiceOverview,
-  importComfyWorkflow,
   importVoiceReference,
   indexProjectKnowledge,
   listApprovals,
@@ -34,7 +26,6 @@ import {
   resolveApproval,
   runManualDream,
   runVoiceJob,
-  saveComfyProfile,
   saveDesignedVoiceProfile,
   saveDreamRecipe,
   saveDreamSchedule,
@@ -43,14 +34,12 @@ import {
   searchProjectKnowledge,
   setDreamScheduleEnabled,
   setProjectDreaming,
-  type ComfyOverview,
-  type ComfyArtifactSummary,
-  type ComfyWorkflowBinding,
   type DreamOverview,
   type DreamRecipeSummary,
   type DreamScheduleSummary,
   type MasterApproval,
   type MasterProject,
+  type MasterProjectType,
   type MasterRun,
   type MasterRunEvent,
   type KnowledgeDocumentSummary,
@@ -58,106 +47,15 @@ import {
   type VoiceOverview,
   type VoiceEngineHealth,
 } from "../lib/projectMasterApi";
+import { CreatorWorkspace } from "./creator/CreatorWorkspace";
+import {
+  DashboardFrame,
+  Empty,
+  Panel,
+  Stamp,
+  useBusyAction,
+} from "./workspaces/DashboardPrimitives";
 import type { MasterWorkspace } from "./WorkspaceNavigation";
-
-interface DashboardFrameProps {
-  eyebrow: string;
-  title: string;
-  description: string;
-  status: string;
-  children: ReactNode;
-  error?: string | null;
-  busy?: boolean;
-  onRefresh: () => void;
-}
-
-function DashboardFrame({
-  eyebrow,
-  title,
-  description,
-  status,
-  children,
-  error,
-  busy,
-  onRefresh,
-}: DashboardFrameProps) {
-  return (
-    <section className="feature-workspace feature-workspace--dashboard">
-      <div className="feature-workspace__copy">
-        <span className="feature-workspace__eyebrow">{eyebrow}</span>
-        <div className="feature-workspace__heading">
-          <div>
-            <h1>{title}</h1>
-            <p>{description}</p>
-          </div>
-          <button
-            className="feature-status feature-status--ready"
-            type="button"
-            onClick={onRefresh}
-            disabled={busy}
-          >
-            {busy ? "Working…" : status}
-          </button>
-        </div>
-        {error ? <div className="dashboard-alert" role="alert">{error}</div> : null}
-        <div className="dashboard-grid">{children}</div>
-      </div>
-    </section>
-  );
-}
-
-function Panel({
-  title,
-  kicker,
-  children,
-  wide = false,
-}: {
-  title: string;
-  kicker: string;
-  children: ReactNode;
-  wide?: boolean;
-}) {
-  return (
-    <section className={`dashboard-panel ${wide ? "dashboard-panel--wide" : ""}`}>
-      <header>
-        <span>{kicker}</span>
-        <h2>{title}</h2>
-      </header>
-      <div className="dashboard-panel__body">{children}</div>
-    </section>
-  );
-}
-
-function Empty({ children }: { children: ReactNode }) {
-  return <p className="dashboard-empty">{children}</p>;
-}
-
-function Stamp({ value }: { value?: string }) {
-  if (!value) return null;
-  const date = new Date(value);
-  return <time>{Number.isNaN(date.valueOf()) ? value : date.toLocaleString()}</time>;
-}
-
-function useBusyAction(refresh: () => Promise<void>) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const act = useCallback(
-    async (operation: () => Promise<unknown>) => {
-      setBusy(true);
-      setError(null);
-      try {
-        await operation();
-        await refresh();
-      } catch (caught) {
-        setError(formatProjectMasterError(caught));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refresh],
-  );
-  return { busy, error, setError, act };
-}
 
 function ProjectsDashboard({
   selectedProject,
@@ -182,6 +80,8 @@ function ProjectsDashboard({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [projectRoot, setProjectRoot] = useState("");
+  const [projectType, setProjectType] =
+    useState<MasterProjectType>("general");
 
   const refresh = useCallback(async () => {
     const [nextProjects, toolStatus] = await Promise.all([
@@ -249,6 +149,7 @@ function ProjectsDashboard({
         name: name.trim(),
         description: description.trim(),
         rootPath: projectRoot.trim() || undefined,
+        projectType,
       });
       onSelectProject(created.id);
       setName("");
@@ -285,9 +186,21 @@ function ProjectsDashboard({
     >
       <Panel title="Project index" kicker={`${projects.length} LOCAL`}>
         <form className="compact-form" onSubmit={submitProject}>
-          <input value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder="Project name" required />
-          <input value={projectRoot} onChange={(event) => setProjectRoot(event.currentTarget.value)} placeholder="Local project root (required for Binder)" />
-          <textarea value={description} onChange={(event) => setDescription(event.currentTarget.value)} placeholder="Description" rows={2} />
+          <input aria-label="Project name" value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder="Project name" required />
+          <label>
+            Project type
+            <select
+              value={projectType}
+              onChange={(event) =>
+                setProjectType(event.currentTarget.value as MasterProjectType)
+              }
+            >
+              <option value="general">General</option>
+              <option value="creator">Creator</option>
+            </select>
+          </label>
+          <input aria-label="Local project root" value={projectRoot} onChange={(event) => setProjectRoot(event.currentTarget.value)} placeholder="Local project root (required for Binder)" />
+          <textarea aria-label="Project description" value={description} onChange={(event) => setDescription(event.currentTarget.value)} placeholder="Description" rows={2} />
           <button className="button button--secondary" disabled={action.busy}>Create project</button>
         </form>
         <div className="dashboard-list">
@@ -299,7 +212,10 @@ function ProjectsDashboard({
               onClick={() => onSelectProject(project.id)}
             >
               <strong>{project.name}</strong>
-              <span>{project.status} · {project.description || "No description"}</span>
+              <span>
+                {project.projectType} · {project.status} ·{" "}
+                {project.description || "No description"}
+              </span>
             </button>
           ))}
         </div>
@@ -365,6 +281,7 @@ function ProjectsDashboard({
             </div>
             <form className="binder-search" onSubmit={submitSearch}>
               <input
+                aria-label="Search indexed project knowledge"
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.currentTarget.value)}
                 placeholder="Search indexed project knowledge"
@@ -480,7 +397,7 @@ function ApprovalsDashboard() {
         </label>
         <label className="compact-label">
           Decision note
-          <input value={note} onChange={(event) => setNote(event.currentTarget.value)} placeholder="Why this is safe or should remain blocked" />
+          <input aria-label="Approval decision note" value={note} onChange={(event) => setNote(event.currentTarget.value)} placeholder="Why this is safe or should remain blocked" />
         </label>
         {approvals.length ? (
           <div className="approval-list">
@@ -750,7 +667,7 @@ function DreamDashboard() {
 
   return (
     <DashboardFrame
-      eyebrow="ALL-MODEL IDEATION // PROPOSAL ONLY"
+      eyebrow="CURATED-MODEL IDEATION // PROPOSAL ONLY"
       title="Dream Lab"
       description="Run explicit source material through the local council and review every speculative proposal before promotion."
       status="Refresh"
@@ -766,7 +683,7 @@ function DreamDashboard() {
             <label>Locator<input value={locator} onChange={(event) => setLocator(event.currentTarget.value)} required /></label>
           </div>
           <label>Source content<textarea rows={5} value={source} onChange={(event) => setSource(event.currentTarget.value)} required placeholder="Only the material you explicitly place here is included." /></label>
-          <button className="button button--primary" disabled={action.busy || !source.trim() || !recipeId}>Run all-model Dream</button>
+          <button className="button button--primary" disabled={action.busy || !source.trim() || !recipeId}>Run curated-model Dream</button>
           <small>
             Unscoped recipes remain available here for one-off explicit notes.
             Proposal-only · no automatic promotion.
@@ -775,8 +692,8 @@ function DreamDashboard() {
       </Panel>
       <Panel title="Recipe builder" kicker={`${overview?.recipes.length ?? 0} RECIPES`}>
         <form className="compact-form" onSubmit={submitRecipe}>
-          <input value={customName} onChange={(event) => setCustomName(event.currentTarget.value)} placeholder="Recipe name" required />
-          <textarea value={customObjective} onChange={(event) => setCustomObjective(event.currentTarget.value)} placeholder="Bounded objective" rows={4} required />
+          <input aria-label="Recipe name" value={customName} onChange={(event) => setCustomName(event.currentTarget.value)} placeholder="Recipe name" required />
+          <textarea aria-label="Recipe objective" value={customObjective} onChange={(event) => setCustomObjective(event.currentTarget.value)} placeholder="Bounded objective" rows={4} required />
           <label>
             Consented Project Binder
             <select
@@ -1211,765 +1128,6 @@ function DreamDashboard() {
   );
 }
 
-function safeArtifactDownloadName(
-  artifact: ComfyArtifactSummary,
-): string {
-  const pathParts = artifact.originalFilename.split(/[/\\]/).filter(Boolean);
-  const basename = pathParts[pathParts.length - 1] ?? "";
-  const sanitized = basename
-    .replace(/[\u0000-\u001f\u007f]/g, "")
-    .slice(0, 180);
-  return sanitized || `${artifact.id}.bin`;
-}
-
-function ComfyArtifactCard({
-  jobId,
-  artifact,
-}: {
-  jobId: string;
-  artifact: ComfyArtifactSummary;
-}) {
-  const [url, setUrl] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const previewKind = artifact.mediaType.startsWith("image/")
-    ? "image"
-    : artifact.mediaType.startsWith("audio/")
-      ? "audio"
-      : artifact.mediaType.startsWith("video/")
-        ? "video"
-        : undefined;
-
-  useEffect(
-    () => () => {
-      if (url) URL.revokeObjectURL(url);
-    },
-    [url],
-  );
-
-  async function loadArtifact() {
-    setLoading(true);
-    setError("");
-    try {
-      const blob = await getComfyArtifactContent(jobId, artifact.id);
-      if (blob.size !== artifact.sizeBytes) {
-        throw new Error(
-          "Downloaded artifact size did not match its verified manifest.",
-        );
-      }
-      setUrl(URL.createObjectURL(blob));
-    } catch (caught) {
-      setError(formatProjectMasterError(caught));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <article className="comfy-artifact-card">
-      <header>
-        <div>
-          <strong>{artifact.originalFilename}</strong>
-          <span>
-            {artifact.mediaType} · {(artifact.sizeBytes / 1024).toFixed(1)} KB
-          </span>
-        </div>
-        <b className={artifact.verified ? "is-verified" : ""}>
-          {artifact.verified ? "VERIFIED" : "UNVERIFIED"}
-        </b>
-      </header>
-      {url && previewKind === "image" ? (
-        <img
-          className="comfy-artifact-preview"
-          src={url}
-          alt={`ComfyUI output ${artifact.originalFilename}`}
-          loading="lazy"
-        />
-      ) : null}
-      {url && previewKind === "audio" ? (
-        <audio className="comfy-artifact-preview" src={url} controls />
-      ) : null}
-      {url && previewKind === "video" ? (
-        <video
-          className="comfy-artifact-preview"
-          src={url}
-          controls
-          preload="metadata"
-        />
-      ) : null}
-      <dl>
-        <div>
-          <dt>SHA-256</dt>
-          <dd title={artifact.sha256}>{artifact.sha256}</dd>
-        </div>
-        <div>
-          <dt>Source</dt>
-          <dd>
-            node {artifact.provenance.nodeId} ·{" "}
-            {artifact.provenance.category} #{artifact.provenance.outputIndex}
-          </dd>
-        </div>
-        <div>
-          <dt>Workflow</dt>
-          <dd title={artifact.provenance.workflowDigest}>
-            {artifact.provenance.workflowRevisionId} ·{" "}
-            {artifact.provenance.workflowDigest.slice(0, 12)}…
-          </dd>
-        </div>
-        <div>
-          <dt>Prompt</dt>
-          <dd>{artifact.provenance.remotePromptId}</dd>
-        </div>
-        <div>
-          <dt>Imported</dt>
-          <dd>
-            <Stamp value={artifact.provenance.fetchedAt || artifact.createdAt} />
-          </dd>
-        </div>
-      </dl>
-      <div className="decision-actions">
-        {!url ? (
-          <button
-            className="button button--secondary"
-            type="button"
-            disabled={loading}
-            onClick={() => void loadArtifact()}
-          >
-            {loading
-              ? "Loading…"
-              : previewKind
-                ? "Load preview"
-                : "Prepare download"}
-          </button>
-        ) : (
-          <>
-            <a
-              className="button button--secondary"
-              href={url}
-              download={safeArtifactDownloadName(artifact)}
-            >
-              Download
-            </a>
-            <button
-              className="button button--secondary"
-              type="button"
-              onClick={() => setUrl("")}
-            >
-              Release
-            </button>
-          </>
-        )}
-      </div>
-      {error ? (
-        <small className="artifact-error" role="alert">
-          {error}
-        </small>
-      ) : null}
-    </article>
-  );
-}
-
-function ComfyDashboard() {
-  const [overview, setOverview] = useState<ComfyOverview | null>(null);
-  const [profileId, setProfileId] = useState("local");
-  const [profileName, setProfileName] = useState("Local ComfyUI");
-  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8188");
-  const [trustedHosts, setTrustedHosts] = useState("");
-  const [connection, setConnection] = useState<string>();
-  const [workflowName, setWorkflowName] = useState("");
-  const [workflowJson, setWorkflowJson] = useState("");
-  const [workflowBindings, setWorkflowBindings] = useState<
-    ComfyWorkflowBinding[]
-  >([]);
-  const [decisionNote, setDecisionNote] = useState("");
-  const [selectedProfile, setSelectedProfile] = useState("");
-  const [selectedWorkflow, setSelectedWorkflow] = useState("");
-  const [jobValues, setJobValues] = useState<Record<string, unknown>>({});
-  const refresh = useCallback(async () => setOverview(await getComfyOverview()), []);
-  const action = useBusyAction(refresh);
-  useEffect(() => {
-    void action.act(async () => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refresh]);
-  useEffect(() => {
-    const profiles = overview?.profiles ?? [];
-    const approvedWorkflows =
-      overview?.workflows.filter((item) => item.trustState === "approved") ?? [];
-    setSelectedProfile((current) =>
-      profiles.some((item) => item.id === current)
-        ? current
-        : profiles[0]?.id ?? "",
-    );
-    setSelectedWorkflow((current) =>
-      approvedWorkflows.some((item) => item.id === current)
-        ? current
-        : approvedWorkflows[0]?.id ?? "",
-    );
-  }, [overview]);
-  const selectedWorkflowSummary = overview?.workflows.find(
-    (item) => item.id === selectedWorkflow,
-  );
-  const bindingSignature = selectedWorkflowSummary?.bindings
-    .map((binding) => `${binding.id}:${String(binding.defaultValue)}`)
-    .join("|");
-  useEffect(() => {
-    const workflow = overview?.workflows.find(
-      (item) => item.id === selectedWorkflow,
-    );
-    if (!workflow) {
-      setJobValues({});
-      return;
-    }
-    setJobValues(
-      Object.fromEntries(
-        workflow.bindings.map((binding) => [
-          binding.id,
-          binding.defaultValue ??
-            (binding.valueType === "boolean" ? false : ""),
-        ]),
-      ),
-    );
-    // The signature changes only when the immutable binding contract changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bindingSignature, selectedWorkflow]);
-
-  function submitProfile(event: FormEvent) {
-    event.preventDefault();
-    void action.act(async () => {
-      await saveComfyProfile({
-        id: profileId,
-        name: profileName,
-        baseUrl,
-        trustedHosts: trustedHosts
-          .split(",")
-          .map((host) => host.trim())
-          .filter(Boolean),
-      });
-      setSelectedProfile(profileId);
-    });
-  }
-
-  function submitWorkflow(event: FormEvent) {
-    event.preventDefault();
-    void action.act(async () => {
-      const parsed = JSON.parse(workflowJson) as unknown;
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        throw new Error("ComfyUI API workflow must be a JSON object.");
-      }
-      await importComfyWorkflow(
-        workflowName,
-        parsed as Record<string, unknown>,
-        workflowBindings,
-      );
-      setWorkflowName("");
-      setWorkflowJson("");
-      setWorkflowBindings([]);
-    });
-  }
-
-  function addBinding(
-    id: "prompt" | "seed" | "width" | "height" | "custom",
-  ) {
-    const base =
-      id === "prompt"
-        ? {
-            id: "prompt",
-            inputName: "text",
-            valueType: "string" as const,
-            description: "Positive prompt",
-          }
-        : id === "seed"
-          ? {
-              id: "seed",
-              inputName: "seed",
-              valueType: "integer" as const,
-              description: "Generation seed",
-            }
-          : id === "width" || id === "height"
-            ? {
-                id,
-                inputName: id,
-                valueType: "integer" as const,
-                description: `${id[0].toUpperCase()}${id.slice(1)} in pixels`,
-              }
-            : {
-                id: `value-${workflowBindings.length + 1}`,
-                inputName: "",
-                valueType: "string" as const,
-                description: "",
-              };
-    setWorkflowBindings((current) => [
-      ...current,
-      {
-        ...base,
-        nodeId: "",
-        required: true,
-        defaultValue:
-          id === "seed" ? 0 : id === "width" || id === "height" ? 1024 : undefined,
-        minimum: id === "width" || id === "height" ? 64 : undefined,
-        maximum: id === "width" || id === "height" ? 8192 : undefined,
-        choices: [],
-      },
-    ]);
-  }
-
-  function updateBinding(
-    index: number,
-    update: Partial<ComfyWorkflowBinding>,
-  ) {
-    setWorkflowBindings((current) =>
-      current.map((binding, itemIndex) =>
-        itemIndex === index ? { ...binding, ...update } : binding,
-      ),
-    );
-  }
-
-  function coerceJobValue(
-    binding: ComfyWorkflowBinding,
-    raw: string | boolean,
-  ): unknown {
-    if (binding.valueType === "boolean") return Boolean(raw);
-    if (binding.valueType === "enum") {
-      return binding.choices.find((choice) => String(choice) === String(raw));
-    }
-    if (binding.valueType === "integer") return Number.parseInt(String(raw), 10);
-    if (binding.valueType === "number") return Number.parseFloat(String(raw));
-    return raw;
-  }
-
-  const jobValuesValid = Boolean(
-    selectedWorkflowSummary?.bindings.every((binding) => {
-      const value = jobValues[binding.id];
-      if (binding.required && (value === "" || value === undefined)) return false;
-      if (
-        ["integer", "number"].includes(binding.valueType) &&
-        typeof value === "number"
-      ) {
-        return (
-          Number.isFinite(value) &&
-          (binding.minimum === undefined || value >= binding.minimum) &&
-          (binding.maximum === undefined || value <= binding.maximum)
-        );
-      }
-      return true;
-    }) ?? false,
-  );
-
-  return (
-    <DashboardFrame
-      eyebrow="MEDIA WORKSPACE // COMFYUI"
-      title="Creator"
-      description="Connect a trusted ComfyUI endpoint, review immutable API workflows, and control Project Master-owned jobs."
-      status="Refresh"
-      error={action.error}
-      busy={action.busy}
-      onRefresh={() => void action.act(async () => undefined)}
-    >
-      <Panel title="Connection profile" kicker={overview?.profiles.length ? "CONFIGURED" : "OFFLINE DEFAULT"}>
-        <form className="compact-form" onSubmit={submitProfile}>
-          <div className="compact-form__row">
-            <label>ID<input value={profileId} onChange={(event) => setProfileId(event.currentTarget.value)} required /></label>
-            <label>Name<input value={profileName} onChange={(event) => setProfileName(event.currentTarget.value)} required /></label>
-          </div>
-          <label>Base URL<input value={baseUrl} onChange={(event) => setBaseUrl(event.currentTarget.value)} required /></label>
-          <label>
-            Trusted remote hosts (optional)
-            <input
-              value={trustedHosts}
-              onChange={(event) => setTrustedHosts(event.currentTarget.value)}
-              placeholder="comfy.example.net, 192.168.1.25"
-            />
-          </label>
-          <small>
-            Loopback needs no entry. Every remote hostname must be listed
-            explicitly, uses verified HTTPS, and is stored with this profile.
-            No secret material is accepted here.
-          </small>
-          <div className="decision-actions">
-            <button className="button button--secondary" disabled={action.busy}>Save</button>
-            <button className="button button--secondary" type="button" disabled={!selectedProfile || action.busy} onClick={() => void action.act(async () => {
-              const result = await getComfyProfileStatus(selectedProfile);
-              setConnection(result.ok ? "Connected" : result.error || "Offline");
-            })}>Test selected</button>
-          </div>
-          {connection ? <span className="form-status">{connection}</span> : null}
-        </form>
-      </Panel>
-      <Panel title="Import API workflow" kicker="IMMUTABLE REVISION">
-        <form className="compact-form" onSubmit={submitWorkflow}>
-          <input value={workflowName} onChange={(event) => setWorkflowName(event.currentTarget.value)} placeholder="Workflow name" required />
-          <textarea value={workflowJson} onChange={(event) => setWorkflowJson(event.currentTarget.value)} rows={7} placeholder='Paste ComfyUI "Save (API Format)" JSON' required />
-          <div className="binding-toolbar">
-            <span>Safe job inputs</span>
-            {(["prompt", "seed", "width", "height", "custom"] as const).map(
-              (preset) => (
-                <button
-                  className="button button--secondary"
-                  type="button"
-                  key={preset}
-                  onClick={() => addBinding(preset)}
-                >
-                  + {preset}
-                </button>
-              ),
-            )}
-          </div>
-          {workflowBindings.map((binding, index) => (
-            <fieldset className="binding-editor" key={`${binding.id}-${index}`}>
-              <legend>Binding {index + 1}</legend>
-              <div className="compact-form__row">
-                <label>
-                  Public ID
-                  <input
-                    value={binding.id}
-                    pattern="[A-Za-z0-9][A-Za-z0-9._-]*"
-                    onChange={(event) =>
-                      updateBinding(index, { id: event.currentTarget.value })
-                    }
-                    required
-                  />
-                </label>
-                <label>
-                  Node ID
-                  <input
-                    value={binding.nodeId}
-                    onChange={(event) =>
-                      updateBinding(index, {
-                        nodeId: event.currentTarget.value,
-                      })
-                    }
-                    placeholder="e.g. 6"
-                    required
-                  />
-                </label>
-                <label>
-                  Node input
-                  <input
-                    value={binding.inputName}
-                    onChange={(event) =>
-                      updateBinding(index, {
-                        inputName: event.currentTarget.value,
-                      })
-                    }
-                    placeholder="e.g. text, seed, width"
-                    required
-                  />
-                </label>
-                <label>
-                  Type
-                  <select
-                    value={binding.valueType}
-                    onChange={(event) =>
-                      updateBinding(index, {
-                        valueType: event.currentTarget
-                          .value as ComfyWorkflowBinding["valueType"],
-                      })
-                    }
-                  >
-                    <option value="string">Text</option>
-                    <option value="integer">Integer</option>
-                    <option value="number">Number</option>
-                    <option value="boolean">On/off</option>
-                    <option value="enum">Choice</option>
-                  </select>
-                </label>
-              </div>
-              <div className="compact-form__row">
-                <label>
-                  Default
-                  <input
-                    value={
-                      typeof binding.defaultValue === "boolean"
-                        ? String(binding.defaultValue)
-                        : String(binding.defaultValue ?? "")
-                    }
-                    onChange={(event) => {
-                      const raw = event.currentTarget.value;
-                      updateBinding(index, {
-                        defaultValue:
-                          raw === ""
-                            ? undefined
-                            : binding.valueType === "integer"
-                              ? Number.parseInt(raw, 10)
-                              : binding.valueType === "number"
-                                ? Number.parseFloat(raw)
-                                : binding.valueType === "boolean"
-                                  ? raw === "true"
-                                  : raw,
-                      });
-                    }}
-                  />
-                </label>
-                <label>
-                  Minimum
-                  <input
-                    type="number"
-                    disabled={
-                      !["integer", "number"].includes(binding.valueType)
-                    }
-                    value={binding.minimum ?? ""}
-                    onChange={(event) =>
-                      updateBinding(index, {
-                        minimum:
-                          event.currentTarget.value === ""
-                            ? undefined
-                            : event.currentTarget.valueAsNumber,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  Maximum
-                  <input
-                    type="number"
-                    disabled={
-                      !["integer", "number"].includes(binding.valueType)
-                    }
-                    value={binding.maximum ?? ""}
-                    onChange={(event) =>
-                      updateBinding(index, {
-                        maximum:
-                          event.currentTarget.value === ""
-                            ? undefined
-                            : event.currentTarget.valueAsNumber,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  Choices
-                  <input
-                    disabled={binding.valueType !== "enum"}
-                    value={binding.choices.join(", ")}
-                    onChange={(event) =>
-                      updateBinding(index, {
-                        choices: event.currentTarget.value
-                          .split(",")
-                          .map((item) => item.trim())
-                          .filter(Boolean),
-                      })
-                    }
-                    placeholder="one, two, three"
-                  />
-                </label>
-              </div>
-              <label>
-                Description
-                <input
-                  value={binding.description}
-                  onChange={(event) =>
-                    updateBinding(index, {
-                      description: event.currentTarget.value,
-                    })
-                  }
-                />
-              </label>
-              <div className="decision-actions">
-                <label className="inline-toggle">
-                  <input
-                    type="checkbox"
-                    checked={binding.required}
-                    onChange={(event) =>
-                      updateBinding(index, {
-                        required: event.currentTarget.checked,
-                      })
-                    }
-                  />
-                  Required per job
-                </label>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setWorkflowBindings((current) =>
-                      current.filter((_, itemIndex) => itemIndex !== index),
-                    )
-                  }
-                >
-                  Remove
-                </button>
-              </div>
-            </fieldset>
-          ))}
-          <small>
-            Bindings can change only declared node inputs. The backend validates
-            node IDs, types, ranges, and immutable workflow digest before use.
-          </small>
-          <button className="button button--secondary" disabled={action.busy}>Validate and import</button>
-        </form>
-      </Panel>
-      <Panel title="Workflow trust" kicker={`${overview?.workflows.length ?? 0} REVISIONS`} wide>
-        <label className="compact-label">Decision note<input value={decisionNote} onChange={(event) => setDecisionNote(event.currentTarget.value)} placeholder="Review finding" /></label>
-        <div className="workflow-list">
-          {overview?.workflows.map((workflow) => (
-            <article key={workflow.id}>
-              <div><span>{workflow.trustState.toUpperCase()}</span><strong>{workflow.name}</strong><code>{workflow.digest.slice(0, 16)}</code></div>
-              <div className="decision-actions">
-                <button className="button button--secondary" disabled={action.busy} onClick={() => void action.act(() => decideComfyWorkflow(workflow.id, "rejected", decisionNote || "Rejected during review."))}>Reject</button>
-                <button className="button button--primary" disabled={action.busy || !decisionNote.trim()} onClick={() => void action.act(() => decideComfyWorkflow(workflow.id, "approved", decisionNote.trim()))}>Approve revision</button>
-              </div>
-            </article>
-          ))}
-          {!overview?.workflows.length ? <Empty>No workflow revisions imported.</Empty> : null}
-        </div>
-      </Panel>
-      <Panel title="Queue job" kicker="APPROVED ONLY">
-        <div className="compact-form">
-          <label>Profile<select value={selectedProfile} onChange={(event) => setSelectedProfile(event.currentTarget.value)}>{overview?.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
-          <label>Workflow<select value={selectedWorkflow} onChange={(event) => setSelectedWorkflow(event.currentTarget.value)}>{overview?.workflows.filter((item) => item.trustState === "approved").map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name}</option>)}</select></label>
-          {selectedWorkflowSummary?.bindings.map((binding) => (
-            <label key={binding.id}>
-              {binding.description || binding.id}
-              {binding.valueType === "boolean" ? (
-                <input
-                  type="checkbox"
-                  checked={Boolean(jobValues[binding.id])}
-                  onChange={(event) =>
-                    setJobValues((current) => ({
-                      ...current,
-                      [binding.id]: event.currentTarget.checked,
-                    }))
-                  }
-                />
-              ) : binding.valueType === "enum" ? (
-                <select
-                  value={String(jobValues[binding.id] ?? "")}
-                  onChange={(event) =>
-                    setJobValues((current) => ({
-                      ...current,
-                      [binding.id]: coerceJobValue(
-                        binding,
-                        event.currentTarget.value,
-                      ),
-                    }))
-                  }
-                  required={binding.required}
-                >
-                  <option value="">Choose…</option>
-                  {binding.choices.map((choice) => (
-                    <option value={String(choice)} key={String(choice)}>
-                      {String(choice)}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  type={
-                    ["integer", "number"].includes(binding.valueType)
-                      ? "number"
-                      : "text"
-                  }
-                  step={binding.valueType === "integer" ? 1 : undefined}
-                  min={binding.minimum}
-                  max={binding.maximum}
-                  value={String(jobValues[binding.id] ?? "")}
-                  onChange={(event) =>
-                    setJobValues((current) => ({
-                      ...current,
-                      [binding.id]: coerceJobValue(
-                        binding,
-                        event.currentTarget.value,
-                      ),
-                    }))
-                  }
-                  required={binding.required}
-                />
-              )}
-              <small>
-                {binding.id} → node {binding.nodeId}.{binding.inputName}
-              </small>
-            </label>
-          ))}
-          {!selectedWorkflowSummary?.bindings.length ? (
-            <small>
-              This revision exposes no per-job values and will run exactly as
-              imported.
-            </small>
-          ) : null}
-          <button
-            className="button button--primary"
-            disabled={
-              !selectedProfile ||
-              !selectedWorkflow ||
-              !jobValuesValid ||
-              action.busy
-            }
-            onClick={() =>
-              void action.act(() =>
-                createComfyJob({
-                  profileId: selectedProfile,
-                  workflowRevisionId: selectedWorkflow,
-                  values: jobValues,
-                }),
-              )
-            }
-          >
-            Run workflow
-          </button>
-        </div>
-      </Panel>
-      <Panel
-        title="Job ledger"
-        kicker={`${overview?.jobs.length ?? 0} JOBS`}
-        wide
-      >
-        <ul className="job-list comfy-job-list">
-          {overview?.jobs.map((job) => (
-            <li key={job.id}>
-              <div className="comfy-job-header">
-                <div>
-                  <strong>{job.status}</strong>
-                  <span>{job.workflowRevisionId}</span>
-                  <code>{job.id}</code>
-                </div>
-                <div className="comfy-artifact-status">
-                  <b>{job.artifactStatus.toUpperCase()}</b>
-                  <span>
-                    {job.artifacts.length} persisted artifact
-                    {job.artifacts.length === 1 ? "" : "s"}
-                  </span>
-                </div>
-                {!["succeeded", "failed", "cancelled"].includes(job.status) ? (
-                  <button
-                    disabled={action.busy}
-                    onClick={() =>
-                      void action.act(() => cancelComfyJob(job.id))
-                    }
-                  >
-                    Cancel
-                  </button>
-                ) : null}
-              </div>
-              {job.error ? (
-                <small className="artifact-error">{job.error}</small>
-              ) : null}
-              {job.artifactError ? (
-                <small className="artifact-error">
-                  Artifact import: {job.artifactError}
-                </small>
-              ) : null}
-              {job.artifacts.length ? (
-                <div className="comfy-artifact-gallery">
-                  {job.artifacts.map((artifact) => (
-                    <ComfyArtifactCard
-                      jobId={job.id}
-                      artifact={artifact}
-                      key={artifact.id}
-                    />
-                  ))}
-                </div>
-              ) : job.status === "succeeded" ? (
-                <small>
-                  No local artifact is available. Status: {job.artifactStatus}.
-                </small>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-        {!overview?.jobs.length ? <Empty>No ComfyUI jobs. Offline is expected until a profile is reachable.</Empty> : null}
-      </Panel>
-    </DashboardFrame>
-  );
-}
 
 function ArtifactPlayer({ artifactId }: { artifactId: string }) {
   const [url, setUrl] = useState("");
@@ -2227,7 +1385,7 @@ function VoiceDashboard() {
             WAV file
             <input
               type="file"
-              accept=".wav,audio/wav,audio/x-wav"
+              accept=".wav,audio/wav,audio/x-wav,audio/vnd.wave,audio/wave"
               onChange={(event) =>
                 setReferenceFile(event.currentTarget.files?.[0] ?? null)
               }
@@ -2381,8 +1539,7 @@ function VoiceDashboard() {
 }
 
 interface FeatureWorkspaceProps {
-  workspace: Exclude<MasterWorkspace, "chat">;
-  onReturnToCommand: () => void;
+  workspace: Exclude<MasterWorkspace, "chat" | "communication" | "settings">;
   selectedProjectId: string;
   onSelectProject: (projectId: string) => void;
   onProjectsChange: (projects: MasterProject[]) => void;
@@ -2395,7 +1552,15 @@ export function FeatureWorkspace({
   onProjectsChange,
 }: FeatureWorkspaceProps) {
   if (workspace === "dreams") return <DreamDashboard />;
-  if (workspace === "creator") return <ComfyDashboard />;
+  if (workspace === "creator") {
+    return (
+      <CreatorWorkspace
+        selectedProjectId={selectedProjectId}
+        onSelectProject={onSelectProject}
+        onProjectsChange={onProjectsChange}
+      />
+    );
+  }
   if (workspace === "voice") return <VoiceDashboard />;
   if (workspace === "projects") {
     return (

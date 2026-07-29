@@ -69,7 +69,7 @@ def register_dream_tools(
             recipe_id=str(args["recipe_id"]),
             request_id=request_id,
             sources=sources,
-            models=catalog.load(),
+            models=catalog.load(refresh=True),
             preferred_lead=str(args.get("preferred_lead") or configured_model),
         )
         return execution.to_dict()

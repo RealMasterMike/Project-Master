@@ -7,10 +7,62 @@ from typing import Any
 import httpx
 import pytest
 
+import project_master.config as config_module
 from project_master.config import MasterConfig
 from project_master.core.cancellation import CancellationToken
 from project_master.core.models import Message
 from project_master.llm.ollama import OllamaClient, OllamaError
+
+_UNCENSORED_CHAT_DEFAULT = (
+    "hf.co/TrevorJS/gemma-4-E4B-it-uncensored-GGUF:Q4_K_M"
+)
+
+
+def test_shipped_uncensored_chat_default_stays_aligned(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    engine_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(config_module, "load_dotenv", lambda: False)
+    monkeypatch.delenv("MASTER_MODEL", raising=False)
+    monkeypatch.setenv("MASTER_DB_PATH", str(tmp_path / "master.db"))
+    monkeypatch.setenv("MASTER_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+
+    shipped = MasterConfig.load(engine_root / "config" / "default.yaml")
+    example_value = next(
+        line.partition("=")[2]
+        for line in (engine_root / ".env.example").read_text(
+            encoding="utf-8",
+        ).splitlines()
+        if line.startswith("MASTER_MODEL=")
+    )
+
+    assert MasterConfig().model == _UNCENSORED_CHAT_DEFAULT
+    assert shipped.model == _UNCENSORED_CHAT_DEFAULT
+    assert example_value == _UNCENSORED_CHAT_DEFAULT
+
+
+def test_shipped_context_defaults_stay_aligned(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    engine_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(config_module, "load_dotenv", lambda: False)
+    monkeypatch.delenv("MASTER_NUM_CTX", raising=False)
+    monkeypatch.setenv("MASTER_DB_PATH", str(tmp_path / "master.db"))
+    monkeypatch.setenv("MASTER_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+
+    shipped = MasterConfig.load(engine_root / "config" / "default.yaml")
+    example_value = next(
+        line.partition("=")[2]
+        for line in (engine_root / ".env.example").read_text(encoding="utf-8").splitlines()
+        if line.startswith("MASTER_NUM_CTX=")
+    )
+
+    assert MasterConfig().num_ctx == 65536
+    assert shipped.num_ctx == 65536
+    assert example_value == "65536"
+    assert OllamaClient("http://127.0.0.1:11434", "test").num_ctx == 65536
 
 
 def test_context_length_loads_from_environment(monkeypatch: Any, tmp_path: Path) -> None:
@@ -28,16 +80,36 @@ def test_ollama_chat_sends_num_ctx(monkeypatch: Any) -> None:
         captured.update(kwargs["json"])
         return httpx.Response(
             200,
-            json={"message": {"role": "assistant", "content": "ok"}},
+            json={
+                "message": {"role": "assistant", "content": "ok"},
+                "done_reason": "length",
+            },
             request=httpx.Request("POST", url),
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
     client = OllamaClient("http://127.0.0.1:11434", "test", num_ctx=65536)
-    client.chat([Message(role="user", content="hello")])
+    response = client.chat(
+        [Message(role="user", content="hello", images=("cHJvamVjdC1pbWFnZQ==",))]
+    )
     assert captured["options"]["num_ctx"] == 65536
     assert captured["options"]["num_predict"] == 2048
     assert captured["keep_alive"] == "5m"
+    assert captured["messages"] == [
+        {
+            "role": "user",
+            "content": "hello",
+            "images": ["cHJvamVjdC1pbWFnZQ=="],
+        }
+    ]
+    assert response.finish_reason == "length"
+
+
+def test_message_omits_empty_image_payload() -> None:
+    assert Message(role="user", content="text only").to_ollama() == {
+        "role": "user",
+        "content": "text only",
+    }
 
 
 def test_toolless_model_gracefully_receives_plain_chat_request(monkeypatch: Any) -> None:
@@ -433,6 +505,91 @@ def test_ollama_stream_closes_active_response_when_cancelled(monkeypatch: Any) -
     assert list(stream) == []
 
 
+def test_streaming_http_error_reports_body_instead_of_response_not_read(
+    monkeypatch: Any,
+) -> None:
+    url = "http://127.0.0.1:11434/api/chat"
+    response = httpx.Response(
+        500,
+        stream=httpx.ByteStream(b'{"error":"model runner failed"}'),
+        request=httpx.Request("POST", url),
+    )
+
+    class ErrorStream:
+        def __enter__(self) -> httpx.Response:
+            return response
+
+        def __exit__(self, *_args: Any) -> None:
+            response.close()
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda show_url, **_kwargs: httpx.Response(
+            200,
+            json={"capabilities": ["completion"]},
+            request=httpx.Request("POST", show_url),
+        ),
+    )
+    monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: ErrorStream())
+
+    client = OllamaClient("http://127.0.0.1:11434", "broken-model")
+    with pytest.raises(OllamaError, match="HTTP 500.*model runner failed"):
+        list(client.chat_stream([Message(role="user", content="hello")]))
+
+
+def test_streaming_finish_reason_is_preserved_on_terminal_fragment(
+    monkeypatch: Any,
+) -> None:
+    class LengthLimitedResponse:
+        def __enter__(self) -> LengthLimitedResponse:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def iter_lines(self) -> Any:
+            yield json.dumps(
+                {
+                    "message": {"content": "A complete-looking sentence."},
+                    "done": True,
+                    "done_reason": "length",
+                }
+            )
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, **_kwargs: httpx.Response(
+            200,
+            json={"capabilities": ["completion"]},
+            request=httpx.Request("POST", url),
+        ),
+    )
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        lambda *_args, **_kwargs: LengthLimitedResponse(),
+    )
+
+    fragments = list(
+        OllamaClient("http://127.0.0.1:11434", "test").chat_stream(
+            [Message(role="user", content="hello")]
+        )
+    )
+
+    assert [fragment.content for fragment in fragments] == [
+        "A complete-looking sentence."
+    ]
+    assert fragments[-1].finish_reason == "length"
+
+
 def test_thinking_capability_is_explicitly_disabled(monkeypatch: Any) -> None:
     chat_payload: dict[str, Any] = {}
 
@@ -541,10 +698,251 @@ def test_metadata_failure_defaults_to_disabling_thinking(monkeypatch: Any) -> No
     assert chat_payload["think"] is False
 
 
-def test_streaming_thinking_only_response_fails_without_leaking_trace(
+def test_nonstreaming_thinking_only_response_gets_one_visible_answer_retry(
     monkeypatch: Any,
 ) -> None:
-    captured: dict[str, Any] = {}
+    chat_payloads: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        if url.endswith("/api/show"):
+            return httpx.Response(
+                200,
+                json={"capabilities": ["completion", "thinking"]},
+                request=httpx.Request("POST", url),
+            )
+        chat_payloads.append(kwargs["json"])
+        if len(chat_payloads) == 1:
+            body = {
+                "message": {
+                    "content": "",
+                    "thinking": "private trace must not leak",
+                },
+                "done_reason": "length",
+            }
+        else:
+            body = {
+                "message": {"content": "Visible answer."},
+                "done_reason": "stop",
+            }
+        return httpx.Response(
+            200,
+            json=body,
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    response = OllamaClient(
+        "http://127.0.0.1:11434",
+        "thinking-model",
+    ).chat([Message(role="user", content="hello")])
+
+    assert response.content == "Visible answer."
+    assert response.finish_reason == "stop"
+    assert len(chat_payloads) == 2
+    assert chat_payloads[0]["think"] is False
+    assert chat_payloads[1]["options"]["num_predict"] == 4096
+    assert chat_payloads[1]["messages"][-1]["role"] == "user"
+    assert "user-visible output" in chat_payloads[1]["messages"][-1]["content"]
+    assert all(
+        "private trace" not in str(payload["messages"])
+        for payload in chat_payloads
+    )
+
+
+def test_streaming_thinking_only_response_gets_one_visible_answer_retry(
+    monkeypatch: Any,
+) -> None:
+    payloads: list[dict[str, Any]] = []
+
+    class AttemptResponse:
+        def __init__(self, attempt: int) -> None:
+            self.attempt = attempt
+
+        def __enter__(self) -> AttemptResponse:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def iter_lines(self) -> Any:
+            if self.attempt == 1:
+                yield json.dumps(
+                    {
+                        "message": {
+                            "content": "",
+                            "thinking": "private trace must not leak",
+                        },
+                        "done": True,
+                        "done_reason": "length",
+                    }
+                )
+                return
+            yield json.dumps(
+                {
+                    "message": {"content": "Visible answer."},
+                    "done": True,
+                    "done_reason": "stop",
+                }
+            )
+
+    def fake_post(url: str, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"capabilities": ["completion", "thinking"]},
+            request=httpx.Request("POST", url),
+        )
+
+    def fake_stream(*_args: Any, **kwargs: Any) -> AttemptResponse:
+        payloads.append(kwargs["json"])
+        return AttemptResponse(len(payloads))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+    fragments = list(
+        OllamaClient(
+            "http://127.0.0.1:11434",
+            "thinking-model",
+        ).chat_stream([Message(role="user", content="hello")])
+    )
+
+    assert [fragment.content for fragment in fragments] == ["Visible answer."]
+    assert fragments[-1].finish_reason == "stop"
+    assert len(payloads) == 2
+    assert payloads[1]["options"]["num_predict"] == 4096
+    assert payloads[1]["messages"][-1]["role"] == "user"
+    assert "user-visible output" in payloads[1]["messages"][-1]["content"]
+    assert all("private trace" not in str(payload["messages"]) for payload in payloads)
+
+
+def test_streaming_private_thinking_without_terminal_frame_is_retried(
+    monkeypatch: Any,
+) -> None:
+    attempts = 0
+
+    class MissingTerminalResponse:
+        def __init__(self, attempt: int) -> None:
+            self.attempt = attempt
+
+        def __enter__(self) -> MissingTerminalResponse:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def iter_lines(self) -> Any:
+            if self.attempt == 1:
+                yield json.dumps(
+                    {
+                        "message": {
+                            "content": "",
+                            "thinking": "private trace must not leak",
+                        },
+                        "done": False,
+                    }
+                )
+                return
+            yield json.dumps(
+                {
+                    "message": {"content": "Recovered answer."},
+                    "done": True,
+                    "done_reason": "stop",
+                }
+            )
+
+    def fake_post(url: str, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"capabilities": ["completion", "thinking"]},
+            request=httpx.Request("POST", url),
+        )
+
+    def fake_stream(*_args: Any, **_kwargs: Any) -> MissingTerminalResponse:
+        nonlocal attempts
+        attempts += 1
+        return MissingTerminalResponse(attempts)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+
+    fragments = list(
+        OllamaClient(
+            "http://127.0.0.1:11434",
+            "thinking-model",
+        ).chat_stream([Message(role="user", content="hello")])
+    )
+
+    assert attempts == 2
+    assert [fragment.content for fragment in fragments] == ["Recovered answer."]
+    assert fragments[-1].finish_reason == "stop"
+
+
+def test_streaming_visible_output_without_terminal_frame_is_marked_truncated(
+    monkeypatch: Any,
+) -> None:
+    class MissingTerminalResponse:
+        def __enter__(self) -> MissingTerminalResponse:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def iter_lines(self) -> Any:
+            yield json.dumps(
+                {
+                    "message": {"content": "Partial but punctuated output."},
+                    "done": False,
+                }
+            )
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, **_kwargs: httpx.Response(
+            200,
+            json={"capabilities": ["completion"]},
+            request=httpx.Request("POST", url),
+        ),
+    )
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        lambda *_args, **_kwargs: MissingTerminalResponse(),
+    )
+
+    fragments = list(
+        OllamaClient("http://127.0.0.1:11434", "test").chat_stream(
+            [Message(role="user", content="hello")]
+        )
+    )
+
+    assert "".join(fragment.content for fragment in fragments) == (
+        "Partial but punctuated output."
+    )
+    assert fragments[-1].finish_reason == "length"
+
+
+def test_streaming_thinking_only_response_reports_plainly_without_leaking_trace(
+    monkeypatch: Any,
+) -> None:
+    payloads: list[dict[str, Any]] = []
 
     class ThinkingOnlyResponse:
         def __enter__(self) -> ThinkingOnlyResponse:
@@ -578,16 +976,27 @@ def test_streaming_thinking_only_response_fails_without_leaking_trace(
         )
 
     def fake_stream(*_args: Any, **kwargs: Any) -> ThinkingOnlyResponse:
-        captured.update(kwargs["json"])
+        payloads.append(kwargs["json"])
         return ThinkingOnlyResponse()
 
     monkeypatch.setattr(httpx, "post", fake_post)
     monkeypatch.setattr(httpx, "stream", fake_stream)
     client = OllamaClient("http://127.0.0.1:11434", "thinking-model")
 
-    with pytest.raises(OllamaError, match="bounded output budget") as exc_info:
-        list(client.chat_stream([Message(role="user", content="hello")]))
+    messages = list(client.chat_stream([Message(role="user", content="hello")]))
 
-    assert captured["think"] is False
-    assert captured["keep_alive"] == "5m"
-    assert "private trace" not in str(exc_info.value)
+    assert len(payloads) == 2
+    assert payloads[0]["think"] is False
+    assert payloads[0]["keep_alive"] == "5m"
+    assert payloads[1]["options"]["num_predict"] == 4096
+
+    # An empty turn is reported as a plain assistant message rather than raising, so the
+    # conversation survives a model that cannot answer. The private trace must still never
+    # reach the user, and the reply must not imply any tool ran.
+    assert len(messages) == 1
+    reply = messages[0]
+    assert reply.role == "assistant"
+    assert "private trace" not in reply.content
+    assert "only private reasoning" in reply.content
+    assert "No tool ran and nothing was changed" in reply.content
+    assert reply.tool_calls == []

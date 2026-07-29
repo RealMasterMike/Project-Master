@@ -163,6 +163,60 @@ class SQLiteStore:
             ).fetchall()
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
+    def search_messages(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        session_id: str | None = None,
+        snippet_chars: int = 240,
+    ) -> list[dict[str, Any]]:
+        """Substring search across stored conversation turns.
+
+        Deliberately LIKE rather than FTS: messages are not indexed, and a
+        literal match keeps operators, code, and punctuation searchable exactly
+        as typed. `%` and `_` are escaped so a query cannot become a wildcard.
+        """
+        needle = query.strip()
+        if not needle:
+            raise ValueError("Search query cannot be empty")
+        escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        clauses = ["messages.content LIKE ? ESCAPE '\\'"]
+        params: list[Any] = [f"%{escaped}%"]
+        if session_id:
+            clauses.append("messages.session_id = ?")
+            params.append(session_id)
+        params.append(max(1, limit))
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT messages.session_id, messages.role, messages.content,
+                       messages.created_at, sessions.title
+                FROM messages
+                JOIN sessions ON sessions.id = messages.session_id
+                WHERE {" AND ".join(clauses)}
+                ORDER BY messages.id DESC
+                LIMIT ?
+                """,  # noqa: S608 - clauses are fixed literals; values stay bound
+                params,
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            content = str(row["content"])
+            position = content.casefold().find(needle.casefold())
+            start = max(0, position - snippet_chars // 3) if position >= 0 else 0
+            snippet = content[start : start + snippet_chars]
+            results.append(
+                {
+                    "session_id": row["session_id"],
+                    "title": row["title"],
+                    "role": row["role"],
+                    "created_at": row["created_at"],
+                    "snippet": ("…" if start else "") + snippet,
+                }
+            )
+        return results
+
     def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connection() as conn:
             rows = conn.execute(

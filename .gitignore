@@ -39,6 +39,10 @@ build/
 ProjectMaster-v0.1.0/workspace/*
 !ProjectMaster-v0.1.0/workspace/.gitkeep
 
+# Mike's private planning, ideas, and working notes. Source code is published;
+# product thinking and personal files are not. Never track anything under private/.
+private/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

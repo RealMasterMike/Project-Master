@@ -1,9 +1,14 @@
-export interface MutationAuthorizedRequest {
+export interface ToolAuthorizedRequest {
   allowMutations: boolean;
+  allowWebSearch: boolean;
 }
 
-export function withCurrentMutationAuthorization<
-  Request extends MutationAuthorizedRequest,
->(request: Request, allowMutations: boolean): Request {
-  return { ...request, allowMutations };
+export function withCurrentToolAuthorization<Request extends ToolAuthorizedRequest>(
+  request: Request,
+  authorization: Pick<
+    ToolAuthorizedRequest,
+    "allowMutations" | "allowWebSearch"
+  >,
+): Request {
+  return { ...request, ...authorization };
 }

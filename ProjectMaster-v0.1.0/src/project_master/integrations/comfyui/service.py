@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from project_master.integrations.comfyui.artifacts import (
     ComfyArtifact,
@@ -17,6 +17,7 @@ from project_master.integrations.comfyui.artifacts import (
 )
 from project_master.integrations.comfyui.jobs import (
     ArtifactStatus,
+    ComfyInputImageProvenance,
     ComfyJob,
     InMemoryJobRepository,
     JobRepository,
@@ -24,15 +25,42 @@ from project_master.integrations.comfyui.jobs import (
 )
 from project_master.integrations.comfyui.profiles import ComfyUIProfile
 from project_master.integrations.comfyui.transport import (
+    MAX_COMFY_INPUT_IMAGE_BYTES,
     ComfyEvent,
     ComfyTransport,
     HistoryResult,
     OutputMetadata,
     QueueSnapshot,
 )
-from project_master.integrations.comfyui.workflow import WorkflowBinding, WorkflowRevision
+from project_master.integrations.comfyui.workflow import (
+    WorkflowBinding,
+    WorkflowPurpose,
+    WorkflowRevision,
+    WorkflowValidationError,
+)
 
 TransportFactory = Callable[[ComfyUIProfile], ComfyTransport]
+BeforeWorkflowSubmit = Callable[[], Awaitable[None]]
+MAX_COMFY_INPUT_IMAGE_EDGE = 16_384
+MAX_COMFY_INPUT_IMAGE_PIXELS = 64 * 1024 * 1024
+_IMAGE_EXTENSION_BY_MEDIA_TYPE = {
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/tiff": ".tiff",
+    "image/webp": ".webp",
+}
+_LOADER_RESOURCE_INPUTS = {
+    "CheckpointLoaderSimple": "ckpt_name",
+    "UNETLoader": "unet_name",
+    "UnetLoaderGGUF": "unet_name",
+    "CLIPLoader": "clip_name",
+    "CLIPLoaderGGUF": "clip_name",
+    "VAELoader": "vae_name",
+    "LoraLoaderModelOnly": "lora_name",
+}
 
 
 class ComfyServiceError(RuntimeError):
@@ -45,6 +73,57 @@ class UnknownProfileError(ComfyServiceError):
 
 class UnknownWorkflowError(ComfyServiceError):
     pass
+
+
+class ComfyInputImageError(ComfyServiceError):
+    pass
+
+
+class MissingWorkflowResource(BaseModel):
+    """One fixed loader value absent from ComfyUI's advertised enum choices."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    node_id: str
+    class_type: str
+    input_name: str
+    resource_name: str
+
+
+class WorkflowIncompatibleError(ComfyServiceError):
+    def __init__(
+        self,
+        profile_id: str,
+        workflow_revision_id: str,
+        missing_node_types: Sequence[str],
+        missing_resources: Sequence[MissingWorkflowResource] = (),
+    ) -> None:
+        self.profile_id = profile_id
+        self.workflow_revision_id = workflow_revision_id
+        self.missing_node_types = tuple(missing_node_types)
+        self.missing_resources = tuple(missing_resources)
+        if not self.missing_resources:
+            joined = ", ".join(self.missing_node_types)
+            super().__init__(
+                f"ComfyUI profile {profile_id!r} is missing node types required by "
+                f"workflow {workflow_revision_id!r}: {joined}."
+            )
+            return
+        sections: list[str] = []
+        if self.missing_node_types:
+            sections.append(f"node types: {', '.join(self.missing_node_types)}")
+        resource_summary = ", ".join(
+            (
+                f"{item.class_type}.{item.input_name}="
+                f"{item.resource_name[:160]!r} (node {item.node_id!r})"
+            )
+            for item in self.missing_resources
+        )
+        sections.append(f"loader resources: {resource_summary}")
+        super().__init__(
+            f"ComfyUI profile {profile_id!r} is missing requirements for "
+            f"workflow {workflow_revision_id!r}: {'; '.join(sections)}."
+        )
 
 
 class WorkflowRejectedError(ComfyServiceError):
@@ -69,6 +148,37 @@ class WorkflowCompatibility(BaseModel):
     workflow_revision_id: str
     compatible: bool
     missing_node_types: tuple[str, ...] = ()
+    missing_resources: tuple[MissingWorkflowResource, ...] = ()
+
+
+class ComfyMemoryRelease(BaseModel):
+    """Best-effort result of releasing idle ComfyUI model caches."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ready: bool
+    active_profile_ids: tuple[str, ...] = ()
+    released_profile_ids: tuple[str, ...] = ()
+    unreachable_profile_ids: tuple[str, ...] = ()
+
+
+class ResolvedInputImage(BaseModel):
+    """Verified app-owned image bytes returned by the runtime's narrow resolver."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    asset_id: str = Field(pattern=r"^media-asset-[0-9a-f]{32}$")
+    name: str = Field(min_length=1, max_length=255)
+    kind: Literal["image", "video", "audio"]
+    media_type: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(gt=0)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    content: bytes
+
+
+InputImageResolver = Callable[[str, str], ResolvedInputImage]
 
 
 class ComfyUIService:
@@ -85,6 +195,8 @@ class ComfyUIService:
         *,
         jobs: JobRepository | None = None,
         artifact_store: ComfyArtifactStore | None = None,
+        input_image_resolver: InputImageResolver | None = None,
+        before_workflow_submit: BeforeWorkflowSubmit | None = None,
     ) -> None:
         self._profiles = {profile.id: profile for profile in profiles}
         if len(self._profiles) != len(profiles):
@@ -92,6 +204,8 @@ class ComfyUIService:
         self._transport_factory = transport_factory
         self.jobs = jobs or InMemoryJobRepository()
         self._artifact_store = artifact_store
+        self._input_image_resolver = input_image_resolver
+        self._before_workflow_submit = before_workflow_submit
         self._workflows: dict[str, WorkflowRevision] = {}
 
     def list_profiles(self) -> tuple[ComfyUIProfile, ...]:
@@ -127,8 +241,15 @@ class ComfyUIService:
         name: str,
         source: str | bytes | Mapping[str, Any],
         bindings: Sequence[WorkflowBinding] = (),
+        *,
+        purpose: WorkflowPurpose = "general",
     ) -> WorkflowRevision:
-        revision = WorkflowRevision.import_json(name, source, tuple(bindings))
+        revision = WorkflowRevision.import_json(
+            name,
+            source,
+            tuple(bindings),
+            purpose=purpose,
+        )
         self.add_workflow(revision)
         return revision.model_copy(deep=True)
 
@@ -156,22 +277,107 @@ class ComfyUIService:
     async def queue_status(self, profile_id: str) -> QueueSnapshot:
         return await self._transport(profile_id).queue()
 
+    async def release_idle_models(
+        self,
+        *,
+        profile_timeout_seconds: float | None = None,
+    ) -> ComfyMemoryRelease:
+        """Release caches only when every reachable configured queue is idle.
+
+        ComfyUI is optional. A profile that cannot be reached or authenticated is recorded and
+        skipped, while any observed running or queued prompt prevents `/free` on every profile.
+        """
+        if profile_timeout_seconds is not None and (
+            not isinstance(profile_timeout_seconds, (int, float))
+            or isinstance(profile_timeout_seconds, bool)
+            or profile_timeout_seconds <= 0
+        ):
+            raise ValueError("profile_timeout_seconds must be positive")
+
+        async def observe(
+            profile: ComfyUIProfile,
+        ) -> tuple[str, ComfyTransport | None, QueueSnapshot | None]:
+            try:
+                transport = self._transport_factory(profile)
+                operation = transport.queue()
+                snapshot = (
+                    await operation
+                    if profile_timeout_seconds is None
+                    else await asyncio.wait_for(
+                        operation,
+                        timeout=profile_timeout_seconds,
+                    )
+                )
+            except Exception:
+                return profile.id, None, None
+            return profile.id, transport, snapshot
+
+        observations = await asyncio.gather(
+            *(observe(profile) for profile in self.list_profiles())
+        )
+        unreachable = {
+            profile_id
+            for profile_id, transport, snapshot in observations
+            if transport is None or snapshot is None
+        }
+        active = {
+            profile_id
+            for profile_id, _transport, snapshot in observations
+            if snapshot is not None and (snapshot.running or snapshot.queued)
+        }
+        if active:
+            return ComfyMemoryRelease(
+                ready=False,
+                active_profile_ids=tuple(sorted(active)),
+                unreachable_profile_ids=tuple(sorted(unreachable)),
+            )
+
+        async def release(profile_id: str, transport: ComfyTransport) -> str | None:
+            try:
+                operation = transport.free_models_and_memory()
+                if profile_timeout_seconds is None:
+                    await operation
+                else:
+                    await asyncio.wait_for(
+                        operation,
+                        timeout=profile_timeout_seconds,
+                    )
+            except Exception:
+                unreachable.add(profile_id)
+                return None
+            return profile_id
+
+        released = await asyncio.gather(
+            *(
+                release(profile_id, transport)
+                for profile_id, transport, snapshot in observations
+                if transport is not None and snapshot is not None
+            )
+        )
+        return ComfyMemoryRelease(
+            ready=True,
+            released_profile_ids=tuple(sorted(item for item in released if item is not None)),
+            unreachable_profile_ids=tuple(sorted(unreachable)),
+        )
+
     async def validate_compatibility(
         self, profile_id: str, workflow_revision_id: str
     ) -> WorkflowCompatibility:
         revision = self.get_workflow(workflow_revision_id)
         object_info = await self._transport(profile_id).object_info()
-        used_types = {
-            node["class_type"]
-            for node in revision.workflow.values()
-            if isinstance(node.get("class_type"), str)
-        }
-        missing = tuple(sorted(used_types - set(object_info)))
+        missing_node_types = _missing_node_types(revision, object_info)
+        bound_targets = {(binding.node_id, binding.input_name) for binding in revision.bindings}
+        missing_resources = _missing_fixed_loader_resources(
+            revision.workflow,
+            object_info,
+            ignored_targets=bound_targets,
+        )
         return WorkflowCompatibility(
             profile_id=profile_id,
             workflow_revision_id=workflow_revision_id,
-            compatible=not missing,
-            missing_node_types=missing,
+            compatible=not missing_node_types and not missing_resources,
+            missing_node_types=missing_node_types,
+            missing_resources=missing_resources,
         )
 
     async def submit_workflow(
@@ -179,29 +385,70 @@ class ComfyUIService:
         profile_id: str,
         workflow_revision_id: str,
         values: Mapping[str, Any] | None = None,
+        *,
+        project_id: str | None = None,
     ) -> ComfyJob:
         profile = self._profile(profile_id)
         revision = self.get_workflow(workflow_revision_id)
         rendered = revision.render(values)
+        image_bindings = tuple(
+            binding for binding in revision.bindings if binding.value_type == "image_asset"
+        )
+        if image_bindings and project_id is None:
+            raise WorkflowValidationError(
+                "A project_id is required when a workflow uses project media."
+            )
+        transport = self._transport_factory(profile)
+        try:
+            object_info = await transport.object_info()
+        except Exception as exc:
+            raise ComfyServiceError(
+                f"ComfyUI compatibility preflight failed for profile {profile.id!r}; "
+                "no job was created or submitted."
+            ) from exc
+        missing_node_types = _missing_node_types(revision, object_info)
+        missing_resources = _missing_fixed_loader_resources(rendered, object_info)
+        if missing_node_types or missing_resources:
+            raise WorkflowIncompatibleError(
+                profile.id,
+                revision.id,
+                missing_node_types,
+                missing_resources,
+            )
+        input_images = await self._stage_input_images(
+            image_bindings,
+            rendered,
+            project_id,
+            transport,
+        )
+        if self._before_workflow_submit is not None:
+            try:
+                await self._before_workflow_submit()
+            except Exception as exc:
+                raise ComfyServiceError(
+                    "Local model handoff failed; no job was created or submitted."
+                ) from exc
         unique = uuid4().hex
         job = ComfyJob.new(
             job_id=f"comfy-job-{unique}",
             profile_id=profile.id,
             workflow_revision_id=revision.id,
             client_id=f"project-master-{unique}",
+            project_id=project_id,
+            input_images=input_images,
         )
         job = self.jobs.create(job)
-        transport = self._transport_factory(profile)
+        project_master_metadata = {
+            "job_id": job.id,
+            "workflow_revision_id": revision.id,
+        }
+        if job.project_id is not None:
+            project_master_metadata["project_id"] = job.project_id
         try:
             submission = await transport.submit_prompt(
                 rendered,
                 client_id=job.client_id,
-                extra_data={
-                    "project_master": {
-                        "job_id": job.id,
-                        "workflow_revision_id": revision.id,
-                    }
-                },
+                extra_data={"project_master": project_master_metadata},
             )
         except Exception as exc:
             uncertain = job.transition(
@@ -234,6 +481,68 @@ class ComfyUIService:
             status_detail="Accepted by ComfyUI.",
         )
         return self.jobs.save(queued, expected_version=job.version)
+
+    async def _stage_input_images(
+        self,
+        bindings: Sequence[WorkflowBinding],
+        rendered: dict[str, dict[str, Any]],
+        project_id: str | None,
+        transport: ComfyTransport,
+    ) -> tuple[ComfyInputImageProvenance, ...]:
+        if not bindings:
+            return ()
+        if project_id is None:  # guarded before compatibility preflight
+            raise WorkflowValidationError(
+                "A project_id is required when a workflow uses project media."
+            )
+        if self._input_image_resolver is None:
+            raise ComfyInputImageError(
+                "Project media input is not configured; no job was created or submitted."
+            )
+
+        staged_by_content: dict[tuple[str, str], str] = {}
+        provenance: list[ComfyInputImageProvenance] = []
+        for binding in bindings:
+            requested_asset_id = rendered[binding.node_id]["inputs"][binding.input_name]
+            try:
+                resolved = await asyncio.to_thread(
+                    self._input_image_resolver,
+                    project_id,
+                    requested_asset_id,
+                )
+            except Exception as exc:
+                raise ComfyInputImageError(
+                    f"Project image for binding {binding.id!r} could not be resolved; "
+                    "no job was created or submitted."
+                ) from exc
+            image = _validate_resolved_input_image(resolved, requested_asset_id)
+            cache_key = (image.sha256, image.media_type)
+            locator = staged_by_content.get(cache_key)
+            if locator is None:
+                filename = f"{image.sha256}{_IMAGE_EXTENSION_BY_MEDIA_TYPE[image.media_type]}"
+                try:
+                    uploaded = await transport.upload_image(
+                        image.content,
+                        filename=filename,
+                        media_type=image.media_type,
+                    )
+                except Exception as exc:
+                    raise ComfyInputImageError(
+                        f"Project image for binding {binding.id!r} could not be staged; "
+                        "no job was created or submitted."
+                    ) from exc
+                locator = uploaded.relative_locator
+                staged_by_content[cache_key] = locator
+            rendered[binding.node_id]["inputs"][binding.input_name] = locator
+            provenance.append(
+                ComfyInputImageProvenance(
+                    binding_id=binding.id,
+                    source_asset_id=image.asset_id,
+                    source_sha256=image.sha256,
+                    source_name=image.name,
+                )
+            )
+        return tuple(provenance)
 
     def job_status(self, job_id: str) -> ComfyJob:
         return self.jobs.get(job_id)
@@ -550,6 +859,138 @@ class ComfyUIService:
         )[:1_000]
         status = ArtifactStatus.PARTIAL if imported_tuple else ArtifactStatus.FAILED
         return imported_tuple, status, error
+
+
+def _missing_node_types(
+    revision: WorkflowRevision,
+    object_info: Mapping[str, Any],
+) -> tuple[str, ...]:
+    used_types = {
+        node["class_type"]
+        for node in revision.workflow.values()
+        if isinstance(node.get("class_type"), str)
+    }
+    return tuple(sorted(used_types - set(object_info)))
+
+
+def _missing_fixed_loader_resources(
+    workflow: Mapping[str, Mapping[str, Any]],
+    object_info: Mapping[str, Any],
+    *,
+    ignored_targets: set[tuple[str, str]] | None = None,
+) -> tuple[MissingWorkflowResource, ...]:
+    ignored = ignored_targets or set()
+    missing: list[MissingWorkflowResource] = []
+    for node_id, node in workflow.items():
+        class_type = node.get("class_type")
+        if not isinstance(class_type, str):
+            continue
+        input_name = _LOADER_RESOURCE_INPUTS.get(class_type)
+        if input_name is None or (node_id, input_name) in ignored:
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, Mapping):
+            continue
+        resource_name = inputs.get(input_name)
+        if not isinstance(resource_name, str):
+            # Connections and other dynamic values are not fixed resource claims.
+            continue
+        choices = _object_info_string_enum_choices(
+            object_info,
+            class_type,
+            input_name,
+        )
+        if choices is None or resource_name in choices:
+            continue
+        missing.append(
+            MissingWorkflowResource(
+                node_id=node_id,
+                class_type=class_type,
+                input_name=input_name,
+                resource_name=resource_name,
+            )
+        )
+    return tuple(
+        sorted(
+            missing,
+            key=lambda item: (
+                item.class_type,
+                item.input_name,
+                item.resource_name,
+                item.node_id,
+            ),
+        )
+    )
+
+
+def _object_info_string_enum_choices(
+    object_info: Mapping[str, Any],
+    class_type: str,
+    input_name: str,
+) -> frozenset[str] | None:
+    node_info = object_info.get(class_type)
+    if not isinstance(node_info, Mapping):
+        return None
+    inputs = node_info.get("input")
+    if not isinstance(inputs, Mapping):
+        return None
+    for group_name in ("required", "optional"):
+        group = inputs.get(group_name)
+        if not isinstance(group, Mapping) or input_name not in group:
+            continue
+        input_spec = group[input_name]
+        if (
+            not isinstance(input_spec, Sequence)
+            or isinstance(input_spec, (str, bytes, bytearray))
+            or not input_spec
+        ):
+            return None
+        enum_values = input_spec[0]
+        if (
+            not isinstance(enum_values, Sequence)
+            or isinstance(enum_values, (str, bytes, bytearray))
+            or any(not isinstance(value, str) for value in enum_values)
+        ):
+            return None
+        return frozenset(enum_values)
+    return None
+
+
+def _validate_resolved_input_image(
+    resolved: ResolvedInputImage,
+    requested_asset_id: str,
+) -> ResolvedInputImage:
+    try:
+        image = ResolvedInputImage.model_validate(resolved)
+    except ValueError as exc:
+        raise ComfyInputImageError(
+            "Project media resolver returned invalid image metadata."
+        ) from exc
+    if image.asset_id != requested_asset_id:
+        raise ComfyInputImageError("Project media resolver returned a different asset.")
+    if image.kind != "image" or image.media_type not in _IMAGE_EXTENSION_BY_MEDIA_TYPE:
+        raise ComfyInputImageError("Only supported project image assets can be staged.")
+    if (
+        image.name != image.name.strip()
+        or image.name in {".", ".."}
+        or "/" in image.name
+        or "\\" in image.name
+        or any(ord(character) < 32 or ord(character) == 127 for character in image.name)
+    ):
+        raise ComfyInputImageError("Project image has an invalid source name.")
+    if image.size_bytes > MAX_COMFY_INPUT_IMAGE_BYTES:
+        raise ComfyInputImageError("Project image exceeds ComfyUI's 50 MiB input limit.")
+    if len(image.content) != image.size_bytes:
+        raise ComfyInputImageError("Project image size does not match its verified metadata.")
+    if hashlib.sha256(image.content).hexdigest() != image.sha256:
+        raise ComfyInputImageError("Project image failed SHA-256 verification.")
+    if image.width is None or image.height is None:
+        raise ComfyInputImageError("Project image dimensions are required for ComfyUI staging.")
+    if image.width > MAX_COMFY_INPUT_IMAGE_EDGE or image.height > MAX_COMFY_INPUT_IMAGE_EDGE:
+        raise ComfyInputImageError("Project image exceeds ComfyUI's 16384-pixel edge limit.")
+    if image.width * image.height > MAX_COMFY_INPUT_IMAGE_PIXELS:
+        raise ComfyInputImageError("Project image exceeds ComfyUI's 64-megapixel limit.")
+    return image
 
 
 def _bounded_detail(value: str | None) -> str | None:

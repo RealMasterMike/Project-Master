@@ -132,6 +132,18 @@ def validate_output_locator(filename: str, subfolder: str, output_type: str) -> 
 
     if output_type not in {"output", "temp"}:
         raise ComfySecurityError("Only ComfyUI output and temp artifacts may be referenced.")
+    _validate_file_locator(filename, subfolder, label="output")
+
+
+def validate_input_locator(filename: str, subfolder: str, input_type: str) -> None:
+    """Validate one untrusted input locator returned by ComfyUI after an upload."""
+
+    if input_type != "input":
+        raise ComfySecurityError("Only ComfyUI input artifacts may be referenced.")
+    _validate_file_locator(filename, subfolder, label="input")
+
+
+def _validate_file_locator(filename: str, subfolder: str, *, label: str) -> None:
     if (
         not filename
         or not filename.strip()
@@ -143,19 +155,19 @@ def validate_output_locator(filename: str, subfolder: str, output_type: str) -> 
         or "\x00" in filename
         or any(ord(character) < 32 or ord(character) == 127 for character in filename)
     ):
-        raise ComfySecurityError("ComfyUI output filename must be a single safe path component.")
+        raise ComfySecurityError(f"ComfyUI {label} filename must be a single safe path component.")
     if (
         len(subfolder) > 1_024
         or "\x00" in subfolder
         or "\\" in subfolder
         or any(ord(character) < 32 or ord(character) == 127 for character in subfolder)
     ):
-        raise ComfySecurityError("ComfyUI output subfolder is invalid.")
+        raise ComfySecurityError(f"ComfyUI {label} subfolder is invalid.")
     folder = PurePosixPath(subfolder)
     if folder.is_absolute() or any(
         part in {".", ".."} or len(part.encode("utf-8")) > 255 for part in folder.parts
     ):
-        raise ComfySecurityError("ComfyUI output subfolder must remain relative.")
+        raise ComfySecurityError(f"ComfyUI {label} subfolder must remain relative.")
 
 
 def _normalize_base_path(path: str) -> str:

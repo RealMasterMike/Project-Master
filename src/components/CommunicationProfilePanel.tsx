@@ -66,11 +66,11 @@ export function CommunicationProfilePanel({
   }
 
   return (
-    <div className="communication-profile" role="tabpanel" aria-labelledby="customizer-tab-communication">
+    <div className="communication-profile">
       <section className="communication-profile__section" aria-labelledby="communication-profile-heading">
         <div className="communication-profile__heading">
           <div>
-            <span className="customizer-kicker">LOCAL PROFILE</span>
+            <span className="panel-kicker">LOCAL PROFILE</span>
             <h3 id="communication-profile-heading">How MASTER communicates</h3>
           </div>
           <button className="icon-button" type="button" onClick={onRefresh} disabled={isLoading} title="Refresh profile" aria-label="Refresh communication profile">
@@ -103,7 +103,7 @@ export function CommunicationProfilePanel({
       </section>
 
       <section className="communication-profile__section communication-profile__feedback" aria-labelledby="communication-feedback-heading">
-        <span className="customizer-kicker">CORRECT MASTER</span>
+        <span className="panel-kicker">CORRECT MASTER</span>
         <h3 id="communication-feedback-heading">Record a communication failure</h3>
         <p>Use this when a response got the interaction wrong. It does not store the subject matter as memory.</p>
 

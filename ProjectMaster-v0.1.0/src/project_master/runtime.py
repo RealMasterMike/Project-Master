@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,13 +30,17 @@ from project_master.dreams import (
 )
 from project_master.dreams.sources import source_matches_scopes
 from project_master.integrations.comfyui import (
+    MAX_COMFY_INPUT_IMAGE_BYTES,
     ComfyUIProfile,
     ComfyUIService,
     FilesystemComfyArtifactStore,
     HttpxComfyTransport,
+    ResolvedInputImage,
     SQLiteComfyStore,
 )
+from project_master.integrations.comfyui.defaults import seed_bundled_workflows
 from project_master.integrations.voice import (
+    VOICE_RENDER_OWNER_PREFIX,
     EngineAdapter,
     EspeakNgAdapter,
     GovernorVoiceLeaseProvider,
@@ -46,8 +52,14 @@ from project_master.integrations.voice import (
 )
 from project_master.knowledge import KnowledgeService, KnowledgeStore
 from project_master.llm.ollama import OllamaClient
+from project_master.media import (
+    FilesystemMediaArtifactStore,
+    MediaLibraryService,
+    SQLiteMediaCatalog,
+)
 from project_master.memory.store import SQLiteStore
 from project_master.orchestration.resource import (
+    INTERACTIVE_CHAT_OWNER_PREFIX,
     LOCAL_GPU_INFERENCE_RESOURCE,
     ResourceGovernor,
 )
@@ -58,6 +70,7 @@ from project_master.tools.builtin import build_registry
 from project_master.tools.comfyui import register_comfyui_tools
 from project_master.tools.dreams import register_dream_tools
 from project_master.tools.knowledge import register_knowledge_tools
+from project_master.tools.search import register_search_tools
 from project_master.tools.terminal import (
     TerminalPolicy,
     WorkspaceTerminal,
@@ -82,11 +95,17 @@ class MasterRuntime:
     dream_store: DreamStore | None = None
     knowledge: KnowledgeService | None = None
     knowledge_store: KnowledgeStore | None = None
+    media: MediaLibraryService | None = None
+    media_catalog: SQLiteMediaCatalog | None = None
     terminal: WorkspaceTerminal | None = None
     voice: VoiceStudioService | None = None
     voice_store: SQLiteVoiceStore | None = None
     resource_governor: ResourceGovernor | None = None
     model_catalog: OllamaModelCatalog | None = None
+    prepare_interactive_model_use: Callable[[float], bool] | None = field(
+        default=None,
+        repr=False,
+    )
     _activity_lock: threading.Lock = field(
         default_factory=threading.Lock,
         init=False,
@@ -122,6 +141,7 @@ class MasterRuntime:
             max_tool_rounds=self.config.max_tool_rounds,
             max_history_messages=self.config.max_history_messages,
             max_prompt_chars=self.config.max_prompt_chars,
+            max_auto_continuations=self.config.max_auto_continuations,
         )
 
     def start_background_services(self) -> bool:
@@ -165,7 +185,7 @@ class MasterRuntime:
                 self._finish_foreground_wait()
                 return False
 
-        owner = f"interactive-chat:{uuid4().hex}"
+        owner = f"{INTERACTIVE_CHAT_OWNER_PREFIX}{uuid4().hex}"
         governor = self.resource_governor
         while governor is not None and not governor.acquire(
             LOCAL_GPU_INFERENCE_RESOURCE,
@@ -182,6 +202,23 @@ class MasterRuntime:
                 self._finish_foreground_wait()
                 return False
             time.sleep(0.05)
+        prepare = self.prepare_interactive_model_use
+        if prepare is not None:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                ready = prepare(remaining)
+            except Exception:
+                if governor is not None:
+                    governor.release(LOCAL_GPU_INFERENCE_RESOURCE, owner)
+                self._model_execution_lock.release()
+                self._finish_foreground_wait()
+                raise
+            if not ready:
+                if governor is not None:
+                    governor.release(LOCAL_GPU_INFERENCE_RESOURCE, owner)
+                self._model_execution_lock.release()
+                self._finish_foreground_wait()
+                return False
         with self._activity_lock:
             self._foreground_waiters -= 1
             self._interactive_count = 1
@@ -239,6 +276,12 @@ def build_runtime(config_path: str | Path | None = None) -> MasterRuntime:
     orchestration = OrchestrationStore(store)
     knowledge_store = KnowledgeStore(store)
     knowledge = KnowledgeService(knowledge_store, orchestration)
+    media_catalog = SQLiteMediaCatalog(store)
+    media = MediaLibraryService(
+        media_catalog,
+        FilesystemMediaArtifactStore(config.db_path.parent / "media-artifacts"),
+        project_exists=lambda project_id: orchestration.get_project(project_id) is not None,
+    )
     comfy_store = SQLiteComfyStore(store)
     profiles = comfy_store.list_profiles()
     if not profiles:
@@ -260,6 +303,37 @@ def build_runtime(config_path: str | Path | None = None) -> MasterRuntime:
             transport_cache[key] = transport
         return transport
 
+    def resolve_comfy_input_image(
+        project_id: str,
+        asset_id: str,
+    ) -> ResolvedInputImage:
+        asset = media.get_project_asset(project_id, asset_id)
+        if asset.kind.value != "image":
+            raise ValueError("Only project image assets can be used as ComfyUI inputs.")
+        if asset.size_bytes > MAX_COMFY_INPUT_IMAGE_BYTES:
+            raise ValueError("Project image exceeds ComfyUI's 50 MiB input limit.")
+        verified_asset, content_path = media.verified_content_path(asset_id)
+        if (
+            verified_asset.id != asset.id
+            or verified_asset.sha256 != asset.sha256
+            or verified_asset.size_bytes != asset.size_bytes
+        ):
+            raise ValueError("Project image metadata changed during verification.")
+        return ResolvedInputImage(
+            asset_id=asset.id,
+            name=asset.name,
+            kind=asset.kind.value,
+            media_type=asset.media_type,
+            sha256=asset.sha256,
+            size_bytes=asset.size_bytes,
+            width=asset.width,
+            height=asset.height,
+            content=content_path.read_bytes(),
+        )
+
+    async def unload_ollama_before_comfy_submit() -> None:
+        await asyncio.to_thread(provider.unload_active_model)
+
     comfy = ComfyUIService(
         profiles,
         comfy_transport,
@@ -267,9 +341,12 @@ def build_runtime(config_path: str | Path | None = None) -> MasterRuntime:
         artifact_store=FilesystemComfyArtifactStore(
             config.db_path.parent / "comfy-artifacts"
         ),
+        input_image_resolver=resolve_comfy_input_image,
+        before_workflow_submit=unload_ollama_before_comfy_submit,
     )
     for stored_workflow in comfy_store.list_workflows():
         comfy.add_workflow(stored_workflow.revision)
+    seed_bundled_workflows(comfy, comfy_store)
     council = SequentialCouncil(
         lambda model: provider.for_model(
             model,
@@ -283,6 +360,14 @@ def build_runtime(config_path: str | Path | None = None) -> MasterRuntime:
     )
     catalog = OllamaModelCatalog(provider)
     resource_governor = ResourceGovernor(store)
+    # No interactive chat can still be running at startup, so any surviving
+    # chat lease was orphaned by a hard kill and would otherwise block voice
+    # rendering and Dream runs until its hour-long TTL expired.
+    resource_governor.release_process_scoped(INTERACTIVE_CHAT_OWNER_PREFIX)
+    # Voice render leases are also process-scoped. SQLiteVoiceStore recovers
+    # any matching in-flight jobs to INTERRUPTED below; clear the orphaned
+    # governor ownership here so they can be explicitly resumed immediately.
+    resource_governor.release_process_scoped(VOICE_RENDER_OWNER_PREFIX)
     voice_store = SQLiteVoiceStore(
         store,
         config.db_path.parent / "voice-artifacts",
@@ -351,6 +436,7 @@ def build_runtime(config_path: str | Path | None = None) -> MasterRuntime:
         configured_model=config.model,
     )
     register_knowledge_tools(tools, knowledge)
+    register_search_tools(tools, store, config.workspace_root)
     register_terminal_tool(tools, terminal)
     register_voice_tools(tools, voice, voice_store)
     agent = ProjectMasterAgent(
@@ -362,6 +448,7 @@ def build_runtime(config_path: str | Path | None = None) -> MasterRuntime:
         max_tool_rounds=config.max_tool_rounds,
         max_history_messages=config.max_history_messages,
         max_prompt_chars=config.max_prompt_chars,
+        max_auto_continuations=config.max_auto_continuations,
     )
     runtime = MasterRuntime(
         config,
@@ -376,11 +463,17 @@ def build_runtime(config_path: str | Path | None = None) -> MasterRuntime:
         dream_store=dream_store,
         knowledge=knowledge,
         knowledge_store=knowledge_store,
+        media=media,
+        media_catalog=media_catalog,
         terminal=terminal,
         voice=voice,
         voice_store=voice_store,
         resource_governor=resource_governor,
         model_catalog=catalog,
+        prepare_interactive_model_use=lambda timeout: _prepare_comfy_for_interactive_model(
+            comfy,
+            timeout_seconds=timeout,
+        ),
     )
     runtime.team = ProjectMasterTeam(
         catalog=catalog,
@@ -399,12 +492,68 @@ def build_runtime(config_path: str | Path | None = None) -> MasterRuntime:
             store=store,
             orchestration=orchestration,
         ),
-        model_provider=catalog.load,
+        model_provider=lambda: catalog.load(refresh=True),
         resource_provider=lambda: _resource_snapshot(runtime, resource_governor),
         interactive_probe=lambda: runtime.interactive_model_busy,
         config=DreamBackgroundConfig(preferred_lead=config.model),
     )
     return runtime
+
+
+def _prepare_comfy_for_interactive_model(
+    comfy: ComfyUIService,
+    *,
+    timeout_seconds: float,
+) -> bool:
+    """Wait for reachable Comfy queues to idle, then release their model caches."""
+    if timeout_seconds < 0:
+        raise ValueError("timeout_seconds must not be negative")
+    return asyncio.run(
+        _wait_for_idle_comfy_and_release(
+            comfy,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+
+async def _wait_for_idle_comfy_and_release(
+    comfy: ComfyUIService,
+    *,
+    timeout_seconds: float,
+) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    transports: dict[str, HttpxComfyTransport] = {}
+
+    def fresh_transport(profile: ComfyUIProfile) -> HttpxComfyTransport:
+        key = profile.model_dump_json()
+        transport = transports.get(key)
+        if transport is None:
+            transport = HttpxComfyTransport(profile)
+            transports[key] = transport
+        return transport
+
+    probe = ComfyUIService(comfy.list_profiles(), fresh_transport)
+    try:
+        while True:
+            remaining = max(0.0, deadline - loop.time())
+            # A stopped optional integration must not consume the entire interactive timeout.
+            # Each profile still uses its validated URL, auth, TLS, and redirect policy.
+            profile_timeout = max(0.05, min(1.0, remaining or 0.05))
+            result = await probe.release_idle_models(
+                profile_timeout_seconds=profile_timeout,
+            )
+            if result.ready:
+                return True
+            remaining = max(0.0, deadline - loop.time())
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.1, remaining))
+    finally:
+        await asyncio.gather(
+            *(transport.aclose() for transport in transports.values()),
+            return_exceptions=True,
+        )
 
 
 def _scheduled_dream_sources(

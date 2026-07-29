@@ -61,15 +61,26 @@ class ProjectMasterTeam:
         supplemental_context: str = "",
         project_id: str | None = None,
         allow_mutations: bool = False,
+        allow_web_search: bool = False,
     ) -> TeamResponse:
-        models = self.catalog.load()
+        models = self.catalog.load(refresh=True)
         _project_id, run_id = self._start_run(
             user_text,
             project_id=project_id,
             allow_mutations=allow_mutations,
+            allow_web_search=allow_web_search,
         )
-        plan = self.council.role_assigner.assign(models, preferred_lead or self.configured_model)
-        self._persist_roles(run_id, plan, allow_mutations=allow_mutations)
+        plan = self.council.role_assigner.assign(
+            models,
+            preferred_lead or self.configured_model,
+            required_purpose="team",
+        )
+        self._persist_roles(
+            run_id,
+            plan,
+            allow_mutations=allow_mutations,
+            allow_web_search=allow_web_search,
+        )
         activities: list[dict[str, Any]] = []
         council_run = self.council.run(
             CouncilRequest(
@@ -101,6 +112,7 @@ class ProjectMasterTeam:
                     _advisory_context(result),
                 ),
                 allow_mutations=allow_mutations,
+                allow_web_search=allow_web_search,
             )
         except Exception as exc:
             self.orchestration.append_event(
@@ -141,15 +153,26 @@ class ProjectMasterTeam:
         supplemental_context: str = "",
         project_id: str | None = None,
         allow_mutations: bool = False,
+        allow_web_search: bool = False,
     ) -> Iterator[dict[str, Any]]:
-        models = self.catalog.load()
+        models = self.catalog.load(refresh=True)
         _project_id, run_id = self._start_run(
             user_text,
             project_id=project_id,
             allow_mutations=allow_mutations,
+            allow_web_search=allow_web_search,
         )
-        plan = self.council.role_assigner.assign(models, preferred_lead or self.configured_model)
-        self._persist_roles(run_id, plan, allow_mutations=allow_mutations)
+        plan = self.council.role_assigner.assign(
+            models,
+            preferred_lead or self.configured_model,
+            required_purpose="team",
+        )
+        self._persist_roles(
+            run_id,
+            plan,
+            allow_mutations=allow_mutations,
+            allow_web_search=allow_web_search,
+        )
         terminal: CouncilResult | None = None
 
         for activity in self.council.run_stream(
@@ -224,6 +247,7 @@ class ProjectMasterTeam:
                     _advisory_context(terminal),
                 ),
                 allow_mutations=allow_mutations,
+                allow_web_search=allow_web_search,
             ):
                 event["run_id"] = run_id
                 if event["type"] == "tool":
@@ -274,6 +298,7 @@ class ProjectMasterTeam:
         *,
         project_id: str | None = None,
         allow_mutations: bool = False,
+        allow_web_search: bool = False,
     ) -> tuple[str, str]:
         selected_project_id = project_id
         if selected_project_id is None:
@@ -296,8 +321,14 @@ class ProjectMasterTeam:
                 metadata={
                     "chat_mode": "team",
                     "allow_mutations": allow_mutations,
+                    "allow_web_search": allow_web_search,
                     "tool_authorization": (
                         "explicit_mutations_allowed" if allow_mutations else "read_only"
+                    ),
+                    "online_search_authorization": (
+                        "explicit_online_search_allowed"
+                        if allow_web_search
+                        else "local_only"
                     ),
                 },
             )
@@ -313,8 +344,14 @@ class ProjectMasterTeam:
             {
                 "chat_mode": "team",
                 "allow_mutations": allow_mutations,
+                "allow_web_search": allow_web_search,
                 "tool_authorization": (
                     "explicit_mutations_allowed" if allow_mutations else "read_only"
+                ),
+                "online_search_authorization": (
+                    "explicit_online_search_allowed"
+                    if allow_web_search
+                    else "local_only"
                 ),
             },
         )
@@ -327,6 +364,7 @@ class ProjectMasterTeam:
         plan: TeamPlan,
         *,
         allow_mutations: bool = False,
+        allow_web_search: bool = False,
     ) -> None:
         for member in plan.members:
             self.orchestration.add_role(
@@ -348,6 +386,11 @@ class ProjectMasterTeam:
                                 if allow_mutations
                                 else []
                             ),
+                            *(
+                                ["registered_external_network_tools"]
+                                if allow_web_search
+                                else []
+                            ),
                         ]
                         if member is plan.lead
                         else ["advisory_context_only"]
@@ -355,6 +398,9 @@ class ProjectMasterTeam:
                     budget={
                         "sequential": True,
                         "allow_mutations": allow_mutations if member is plan.lead else False,
+                        "allow_web_search": (
+                            allow_web_search if member is plan.lead else False
+                        ),
                     },
                 )
             )

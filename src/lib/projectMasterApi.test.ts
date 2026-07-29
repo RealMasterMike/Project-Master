@@ -7,27 +7,42 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import {
   API_BASE_URL,
+  DEFAULT_UNCENSORED_CHAT_MODEL,
+  DEFAULT_UNCENSORED_CHAT_MODEL_DIGEST,
+  DEFAULT_UNCENSORED_VISION_MODEL,
+  DEFAULT_UNCENSORED_VISION_MODEL_DIGEST,
   cancelChat,
   createComfyJob,
+  createProject,
   createVoiceJob,
   decideDreamItem,
   getComfyOverview,
   getComfyArtifactContent,
+  getComfyProfileStatus,
+  getComfyWorkflowCompatibility,
   getCommunicationProfile,
   getConversation,
   getDreamOverview,
+  getMediaAssetContent,
+  getMediaHealth,
   getModelStatus,
   getRunDetail,
   getVoiceEngineHealth,
   getVoiceOverview,
   importComfyWorkflow,
+  importProjectMediaAsset,
   importVoiceReference,
   indexProjectKnowledge,
+  isCuratedTeamModel,
   listConversations,
   listApprovals,
   listProjectKnowledge,
+  listProjectMediaAssets,
   listProjects,
+  refreshComfyJob,
   resolveApproval,
+  resolveModelSelection,
+  resolveVisionModelSelection,
   runManualDream,
   saveComfyProfile,
   saveDreamRecipe,
@@ -38,8 +53,10 @@ import {
   setProjectDreaming,
   deleteDreamSchedule,
   searchProjectKnowledge,
+  speakMessage,
   streamChat,
   submitCommunicationFeedback,
+  trimProjectVideo,
   type ProjectMasterRunActivity,
 } from "./projectMasterApi";
 
@@ -66,6 +83,8 @@ describe("Project Master stream cancellation protocol", () => {
       message: "Hello",
       mode: "team",
       allowMutations: true,
+      allowWebSearch: true,
+      imageAssetIds: ["media-asset-0123456789abcdef0123456789abcdef"],
       projectId: "project-1",
       signal: new AbortController().signal,
       onToken: (token) => tokens.push(token),
@@ -80,6 +99,10 @@ describe("Project Master stream cancellation protocol", () => {
       request_id: "request-123",
       mode: "team",
       allow_mutations: true,
+      allow_web_search: true,
+      image_asset_ids: [
+        "media-asset-0123456789abcdef0123456789abcdef",
+      ],
       project_id: "project-1",
     });
   });
@@ -103,6 +126,7 @@ describe("Project Master stream cancellation protocol", () => {
       message: "Inspect this project",
       mode: "direct",
       allowMutations: false,
+      allowWebSearch: false,
       signal: new AbortController().signal,
       onToken: vi.fn(),
       onConversation: vi.fn(),
@@ -113,6 +137,7 @@ describe("Project Master stream cancellation protocol", () => {
       request_id: "request-readonly",
       mode: "direct",
       allow_mutations: false,
+      allow_web_search: false,
     });
   });
 
@@ -164,6 +189,7 @@ describe("Project Master stream cancellation protocol", () => {
       message: "Solve this",
       mode: "team",
       allowMutations: false,
+      allowWebSearch: false,
       signal: new AbortController().signal,
       onToken: vi.fn(),
       onConversation: vi.fn(),
@@ -178,6 +204,7 @@ describe("Project Master stream cancellation protocol", () => {
         runId: "run-123",
         model: "critic-model",
         role: "critic",
+        outcome: "success",
       },
       {
         kind: "tool_completed",
@@ -185,10 +212,17 @@ describe("Project Master stream cancellation protocol", () => {
         runId: "run-123",
         tool: "calculator",
         ok: true,
+        outcome: "success",
         inputDetail:
           '{\n  "expression": "2 + 2",\n  "api_key": "[redacted]"\n}',
         outputDetail:
           '{\n  "answer": 4,\n  "token": "[redacted]"\n}',
+      },
+      {
+        kind: "delivery_completed",
+        message: "MASTER delivered the final response",
+        runId: "run-123",
+        outcome: "success",
       },
     ]);
     expect(JSON.stringify(activities)).not.toContain("private");
@@ -197,11 +231,83 @@ describe("Project Master stream cancellation protocol", () => {
     expect(runs).toEqual(["run-123", "run-123", "run-123"]);
   });
 
+  it("distinguishes skipped, unavailable, and blocked tool outcomes", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        [
+          JSON.stringify({ type: "start", conversation_id: "conversation-1" }),
+          JSON.stringify({
+            type: "tool",
+            tool: {
+              name: "workspace_write",
+              arguments: {},
+              result: JSON.stringify({
+                error: "duplicate_tool_call_suppressed",
+                message: "The duplicate was suppressed.",
+              }),
+              ok: false,
+            },
+          }),
+          JSON.stringify({
+            type: "tool",
+            tool: {
+              name: "web_search",
+              arguments: {},
+              result: JSON.stringify({
+                error: "ProjectMasterUnavailableError",
+                message: "Web search is not configured.",
+              }),
+              ok: false,
+            },
+          }),
+          JSON.stringify({
+            type: "tool",
+            tool: {
+              name: "terminal",
+              arguments: {},
+              result: JSON.stringify({
+                error: "PermissionError",
+                message: "Mutating tool requires explicit authorization.",
+              }),
+              ok: false,
+            },
+          }),
+          JSON.stringify({ type: "done", content: "No actions were performed." }),
+          "",
+        ].join("\n"),
+        { status: 200 },
+      ),
+    );
+    const activities: ProjectMasterRunActivity[] = [];
+
+    await streamChat({
+      requestId: "request-outcomes",
+      model: "lead-model",
+      message: "Inspect outcomes",
+      mode: "direct",
+      allowMutations: false,
+      allowWebSearch: false,
+      signal: new AbortController().signal,
+      onToken: vi.fn(),
+      onConversation: vi.fn(),
+      onActivity: (activity) => activities.push(activity),
+    });
+
+    expect(
+      activities.map(({ kind, outcome }) => ({ kind, outcome })),
+    ).toEqual([
+      { kind: "tool_skipped", outcome: "skipped" },
+      { kind: "tool_unavailable", outcome: "unavailable" },
+      { kind: "tool_blocked", outcome: "blocked" },
+    ]);
+  });
+
   it("parses the physical team catalog and reports team compatibility", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           configured_model: "lead-model",
+          recommended_model: "lead-alias",
           num_ctx: 32768,
           ollama_reachable: true,
           models: ["lead-model", "critic-model"],
@@ -210,6 +316,9 @@ describe("Project Master stream cancellation protocol", () => {
               physical_id: "sha256:model-1",
               primary_tag: "lead-model",
               tags: ["lead-model", "lead-alias"],
+              digest: "1".repeat(64),
+              automatic_eligible: true,
+              curated_purposes: ["chat", "team"],
               capabilities: ["completion", "tools"],
               size_bytes: 1_024,
             },
@@ -220,17 +329,158 @@ describe("Project Master stream cancellation protocol", () => {
     );
 
     await expect(getModelStatus()).resolves.toMatchObject({
+      recommendedModel: "lead-alias",
       teamAvailable: true,
       teamCatalog: [
         {
           physicalId: "sha256:model-1",
           primaryTag: "lead-model",
           tags: ["lead-model", "lead-alias"],
+          digest: "1".repeat(64),
+          automaticEligible: true,
+          curatedPurposes: ["chat", "team"],
           capabilities: ["completion", "tools"],
           sizeBytes: 1_024,
         },
       ],
     });
+  });
+
+  it("keeps an explicit model selection and auto-selects only the exact curated identity", () => {
+    const models = [
+      {
+        name: "first-model",
+        capabilities: ["completion"],
+        conversational: true,
+        toolCapable: false,
+      },
+      {
+        name: "recommended-model",
+        capabilities: ["completion", "tools"],
+        conversational: true,
+        toolCapable: true,
+      },
+      {
+        name: "embedding-model",
+        capabilities: ["embedding"],
+        conversational: false,
+        toolCapable: false,
+      },
+      {
+        name: DEFAULT_UNCENSORED_CHAT_MODEL,
+        digest: DEFAULT_UNCENSORED_CHAT_MODEL_DIGEST,
+        curatedPurposes: ["chat", "team", "dream"],
+        capabilities: ["completion", "tools"],
+        conversational: true,
+        toolCapable: true,
+      },
+      {
+        name: DEFAULT_UNCENSORED_VISION_MODEL,
+        digest: DEFAULT_UNCENSORED_VISION_MODEL_DIGEST,
+        curatedPurposes: ["chat", "vision", "team", "dream"],
+        capabilities: ["completion", "vision"],
+        conversational: true,
+        toolCapable: false,
+      },
+    ];
+
+    expect(
+      resolveModelSelection(models, "first-model", "recommended-model"),
+    ).toBe("first-model");
+    expect(
+      resolveModelSelection(models, "missing-model", "recommended-model"),
+    ).toBe("");
+    expect(
+      resolveModelSelection(
+        models,
+        "missing-model",
+        DEFAULT_UNCENSORED_CHAT_MODEL,
+      ),
+    ).toBe(DEFAULT_UNCENSORED_CHAT_MODEL);
+    expect(
+      resolveModelSelection(
+        models,
+        "missing-model",
+        DEFAULT_UNCENSORED_VISION_MODEL,
+      ),
+    ).toBe(DEFAULT_UNCENSORED_VISION_MODEL);
+    expect(resolveModelSelection(models, "missing-model", null)).toBe("");
+    expect(
+      resolveModelSelection(models, "missing-model", "embedding-model"),
+    ).toBe("");
+  });
+
+  it("uses only an explicit vision preference or the installed uncensored default", () => {
+    const models = [
+      {
+        name: "explicit-vision",
+        capabilities: ["completion", "vision"],
+        conversational: true,
+        toolCapable: false,
+      },
+      {
+        name: DEFAULT_UNCENSORED_VISION_MODEL,
+        digest: DEFAULT_UNCENSORED_VISION_MODEL_DIGEST,
+        curatedPurposes: ["chat", "vision", "team", "dream"],
+        capabilities: ["completion", "vision"],
+        conversational: true,
+        toolCapable: false,
+      },
+      {
+        name: "text-only",
+        capabilities: ["completion"],
+        conversational: true,
+        toolCapable: false,
+      },
+    ];
+
+    expect(resolveVisionModelSelection(models, "explicit-vision")).toBe(
+      "explicit-vision",
+    );
+    expect(resolveVisionModelSelection(models, "")).toBe(
+      DEFAULT_UNCENSORED_VISION_MODEL,
+    );
+    expect(resolveVisionModelSelection(models, "text-only")).toBe(
+      DEFAULT_UNCENSORED_VISION_MODEL,
+    );
+    expect(
+      resolveVisionModelSelection([models[0]], ""),
+    ).toBe("");
+    expect(
+      resolveVisionModelSelection(
+        [
+          {
+            ...models[1],
+            digest: "0".repeat(64),
+          },
+        ],
+        "",
+      ),
+    ).toBe("");
+  });
+
+  it("admits only purpose-matched automatic models to Team UI", () => {
+    const base = {
+      name: "curated-model",
+      capabilities: ["completion", "tools"],
+      conversational: true,
+      toolCapable: true,
+      automaticEligible: true,
+    };
+
+    expect(
+      isCuratedTeamModel({ ...base, curatedPurposes: ["chat", "team"] }),
+    ).toBe(true);
+    expect(
+      isCuratedTeamModel({ ...base, curatedPurposes: ["chat"] }),
+    ).toBe(false);
+    expect(
+      isCuratedTeamModel({
+        ...base,
+        automaticEligible: false,
+        curatedPurposes: ["team"],
+      }),
+    ).toBe(false);
   });
 
   it("parses project, run, and approval metadata without arbitrary payload data", async () => {
@@ -320,6 +570,7 @@ describe("Project Master stream cancellation protocol", () => {
         description: "Local work",
         status: "active",
         rootPath: "/workspace",
+        projectType: "general",
         allowDreaming: true,
         updatedAt: "2026-07-27T10:00:00Z",
       },
@@ -340,6 +591,281 @@ describe("Project Master stream cancellation protocol", () => {
       status: "approved",
       note: "Reviewed",
     });
+  });
+
+  it("creates an explicitly typed Creator project", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "project-creator",
+          name: "Launch studio",
+          description: "Video campaign",
+          project_type: "creator",
+          status: "active",
+          root_path: null,
+          updated_at: "2026-07-28T10:00:00Z",
+          metadata: { project_type: "creator" },
+        }),
+        { status: 201 },
+      ),
+    );
+
+    await expect(
+      createProject({
+        name: "Launch studio",
+        description: "Video campaign",
+        projectType: "creator",
+      }),
+    ).resolves.toMatchObject({
+      id: "project-creator",
+      projectType: "creator",
+    });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${API_BASE_URL}/projects`);
+    expect(JSON.parse(String(init.body))).toEqual({
+      name: "Launch studio",
+      description: "Video campaign",
+      root_path: null,
+      project_type: "creator",
+    });
+  });
+
+  it("filters the project list by validated project type", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ projects: [] }), { status: 200 }),
+    );
+
+    await expect(listProjects(undefined, "creator")).resolves.toEqual([]);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `${API_BASE_URL}/projects?project_type=creator`,
+    );
+  });
+
+  it("parses tolerant media health and project-scoped verified assets", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          max_upload_bytes: 500_000_000,
+          supported_kinds: ["image", "video", "audio"],
+          ffprobe_available: true,
+        }),
+        { status: 200 },
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          assets: [
+            {
+              id: "media-video-1",
+              project_ids: ["project-creator"],
+              name: "launch-cut.mp4",
+              kind: "video",
+              source: "local_import",
+              media_type: "video/mp4",
+              sha256: "a".repeat(64),
+              size_bytes: 12_345,
+              duration_seconds: 18.5,
+              width: 1920,
+              height: 1080,
+              created_at: "2026-07-28T12:00:00Z",
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response(new Blob(["VIDEO"], { type: "video/mp4" }), {
+        status: 200,
+        headers: { "Content-Type": "video/mp4" },
+      }),
+    );
+
+    await expect(getMediaHealth()).resolves.toEqual({
+      available: true,
+      maxUploadBytes: 500_000_000,
+      supportedMediaTypes: ["image/*", "video/*", "audio/*"],
+      ffmpegAvailable: undefined,
+      ffprobeAvailable: true,
+    });
+    await expect(
+      listProjectMediaAssets("project-creator"),
+    ).resolves.toEqual([
+      {
+        id: "media-video-1",
+        projectIds: ["project-creator"],
+        name: "launch-cut.mp4",
+        kind: "video",
+        source: "local_import",
+        mediaType: "video/mp4",
+        sha256: "a".repeat(64),
+        sizeBytes: 12_345,
+        durationSeconds: 18.5,
+        width: 1920,
+        height: 1080,
+        createdAt: "2026-07-28T12:00:00Z",
+      },
+    ]);
+    await expect(getMediaAssetContent("media-video-1")).resolves.toBeInstanceOf(
+      Blob,
+    );
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `${API_BASE_URL}/media/health`,
+      `${API_BASE_URL}/projects/project-creator/media`,
+      `${API_BASE_URL}/media/assets/media-video-1/content`,
+    ]);
+  });
+
+  it("uploads media as a raw body with its actual content type", async () => {
+    const upload = Object.assign(
+      new Blob(["video-bytes"], { type: "video/mp4" }),
+      { name: "clip one.mp4" },
+    ) as File;
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          asset: {
+            id: "media-video-2",
+            project_ids: ["project/creator"],
+            name: "clip one.mp4",
+            kind: "video",
+            source: "local_import",
+            media_type: "video/mp4",
+            sha256: "b".repeat(64),
+            size_bytes: upload.size,
+            duration_seconds: null,
+            width: null,
+            height: null,
+            created_at: "2026-07-28T12:05:00Z",
+          },
+        }),
+        { status: 201 },
+      ),
+    );
+
+    await expect(
+      importProjectMediaAsset("project/creator", upload),
+    ).resolves.toMatchObject({
+      id: "media-video-2",
+      kind: "video",
+      mediaType: "video/mp4",
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      `${API_BASE_URL}/projects/project%2Fcreator/media?file_name=clip%20one.mp4`,
+    );
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(upload);
+    expect(new Headers(init.headers).get("Content-Type")).toBe("video/mp4");
+  });
+
+  it("trims project video and parses its verified derivation", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          asset: {
+            id: "media-trim-1",
+            project_ids: ["project/creator"],
+            name: "launch-short.mp4",
+            kind: "video",
+            source: "video_trim",
+            media_type: "video/mp4",
+            sha256: "c".repeat(64),
+            size_bytes: 8_192,
+            duration_seconds: 7.5,
+            width: 1920,
+            height: 1080,
+            derivation: {
+              operation: "video_trim",
+              source_asset_id: "media/source-1",
+              start_seconds: 2.25,
+              end_seconds: 9.75,
+              recipe: "mp4-h264-aac-v1",
+            },
+            created_at: "2026-07-28T12:10:00Z",
+          },
+        }),
+        { status: 201 },
+      ),
+    );
+
+    await expect(
+      trimProjectVideo(
+        "project/creator",
+        "media/source-1",
+        {
+          startSeconds: 2.25,
+          endSeconds: 9.75,
+          outputName: "launch-short.mp4",
+        },
+      ),
+    ).resolves.toMatchObject({
+      id: "media-trim-1",
+      durationSeconds: 7.5,
+      derivation: {
+        operation: "video_trim",
+        sourceAssetId: "media/source-1",
+        startSeconds: 2.25,
+        endSeconds: 9.75,
+        recipe: "mp4-h264-aac-v1",
+      },
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      `${API_BASE_URL}/projects/project%2Fcreator/media/media%2Fsource-1/trim`,
+    );
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    expect(JSON.parse(String(init.body))).toEqual({
+      start_seconds: 2.25,
+      end_seconds: 9.75,
+      output_name: "launch-short.mp4",
+    });
+  });
+
+  it("rejects malformed video trim provenance", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          asset: {
+            id: "media-trim-invalid",
+            project_ids: ["project-creator"],
+            name: "invalid.mp4",
+            kind: "video",
+            source: "video_trim",
+            media_type: "video/mp4",
+            sha256: "d".repeat(64),
+            size_bytes: 1_024,
+            duration_seconds: 4,
+            width: 1280,
+            height: 720,
+            derivation: {
+              operation: "video_trim",
+              source_asset_id: "media-source",
+              start_seconds: 5,
+              end_seconds: 2,
+              recipe: "mp4-h264-aac-v1",
+            },
+            created_at: "2026-07-28T12:15:00Z",
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(
+      trimProjectVideo("project-creator", "media-source", {
+        startSeconds: 1,
+        endSeconds: 2,
+      }),
+    ).rejects.toThrow("invalid media asset derivation");
   });
 
   it("indexes and searches Project Binder documents with versioned citations", async () => {
@@ -619,6 +1145,7 @@ describe("Project Master stream cancellation protocol", () => {
     await runManualDream({
       recipeId: "idea-garden",
       sourceId: "note-1",
+      requestId: "creator.project-1.brief-1",
       locator: "manual-note",
       content: "Explicit source",
     });
@@ -652,6 +1179,7 @@ describe("Project Master stream cancellation protocol", () => {
     const [, runInit] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(JSON.parse(String(runInit.body))).toMatchObject({
       recipe_id: "idea-garden",
+      request_id: "creator.project-1.brief-1",
       sources: [
         {
           source_id: "note-1",
@@ -699,6 +1227,7 @@ describe("Project Master stream cancellation protocol", () => {
               name: "Local",
               base_url: "http://127.0.0.1:8188",
               verify_tls: true,
+              trusted_hosts: [],
               auth: { secret_ref: { key: "SECRET_VALUE" } },
             },
           ],
@@ -708,6 +1237,7 @@ describe("Project Master stream cancellation protocol", () => {
                 id: "comfy-wf-1",
                 name: "Portrait",
                 digest: "abc123",
+                purpose: "image",
                 created_at: "2026-07-27T10:00:00Z",
                 workflow: { "1": { inputs: { prompt: "private prompt" } } },
                 bindings: [
@@ -735,9 +1265,22 @@ describe("Project Master stream cancellation protocol", () => {
                     choices: [],
                     description: "Generation seed",
                   },
+                  {
+                    id: "source_image",
+                    node_id: "3",
+                    input_name: "image",
+                    value_type: "image_asset",
+                    required: true,
+                    default_value: null,
+                    minimum: null,
+                    maximum: null,
+                    choices: [],
+                    description: "Verified project image",
+                  },
                 ],
               },
               trust_state: "approved",
+              curated_default: true,
             },
           ],
           jobs: [
@@ -745,6 +1288,7 @@ describe("Project Master stream cancellation protocol", () => {
               id: "comfy-job-1",
               profile_id: "local",
               workflow_revision_id: "comfy-wf-1",
+              project_id: "creator-project-1",
               status: "succeeded",
               created_at: "2026-07-27T10:02:00Z",
               artifact_status: "partial",
@@ -789,7 +1333,23 @@ describe("Project Master stream cancellation protocol", () => {
         { status: 200 },
       ),
     );
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ id: "job-1" }), { status: 202 }));
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "comfy-job-created",
+          profile_id: "local",
+          workflow_revision_id: "comfy-wf-1",
+          project_id: "creator-project-1",
+          status: "queued",
+          created_at: "2026-07-27T10:04:00Z",
+          artifact_status: "pending",
+          artifact_error: null,
+          artifacts: [],
+          error: null,
+        }),
+        { status: 202 },
+      ),
+    );
     fetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -797,6 +1357,7 @@ describe("Project Master stream cancellation protocol", () => {
             id: "comfy-wf-2",
             name: "Bound portrait",
             digest: "def456",
+            purpose: "image",
             created_at: "2026-07-27T10:01:00Z",
             bindings: [
               {
@@ -811,6 +1372,18 @@ describe("Project Master stream cancellation protocol", () => {
                 choices: [],
                 description: "Positive prompt",
               },
+              {
+                id: "source_image",
+                node_id: "3",
+                input_name: "image",
+                value_type: "image_asset",
+                required: true,
+                default_value: null,
+                minimum: null,
+                maximum: null,
+                choices: [],
+                description: "Verified project image",
+              },
             ],
           },
           trust_state: "pending",
@@ -824,23 +1397,50 @@ describe("Project Master stream cancellation protocol", () => {
         headers: { "Content-Type": "image/png" },
       }),
     );
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "comfy-job-1",
+          profile_id: "local",
+          workflow_revision_id: "comfy-wf-1",
+          project_id: "creator-project-1",
+          status: "succeeded",
+          created_at: "2026-07-27T10:02:00Z",
+          artifact_status: "ready",
+          artifact_error: null,
+          artifacts: [],
+          error: null,
+        }),
+        { status: 200 },
+      ),
+    );
 
     const overview = await getComfyOverview();
     expect(overview).toMatchObject({
-      profiles: [{ id: "local", baseUrl: "http://127.0.0.1:8188" }],
+      profiles: [
+        {
+          id: "local",
+          baseUrl: "http://127.0.0.1:8188",
+          trustedHosts: [],
+        },
+      ],
       workflows: [
         {
           id: "comfy-wf-1",
           trustState: "approved",
+          purpose: "image",
+          curatedDefault: true,
           bindings: [
             { id: "prompt", valueType: "string" },
             { id: "seed", minimum: 0 },
+            { id: "source_image", valueType: "image_asset" },
           ],
         },
       ],
       jobs: [
         {
           id: "comfy-job-1",
+          projectId: "creator-project-1",
           artifactStatus: "partial",
           artifactError: "One optional preview could not be imported.",
           artifacts: [
@@ -864,18 +1464,35 @@ describe("Project Master stream cancellation protocol", () => {
     expect(JSON.stringify(overview)).not.toContain("source_url");
     expect(JSON.stringify(overview)).not.toContain("/view?");
 
-    await createComfyJob({
+    const sourceAssetId =
+      "media-asset-0123456789abcdef0123456789abcdef";
+    const createdJob = await createComfyJob({
       profileId: "local",
       workflowRevisionId: "comfy-wf-1",
-      values: { prompt: "A gold robot", seed: 42 },
+      projectId: "creator-project-1",
+      values: {
+        prompt: "A gold robot",
+        seed: 42,
+        source_image: sourceAssetId,
+      },
+    });
+    expect(createdJob).toMatchObject({
+      id: "comfy-job-created",
+      status: "queued",
+      projectId: "creator-project-1",
     });
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(JSON.parse(String(init.body))).toEqual({
       profile_id: "local",
       workflow_revision_id: "comfy-wf-1",
-      values: { prompt: "A gold robot", seed: 42 },
+      project_id: "creator-project-1",
+      values: {
+        prompt: "A gold robot",
+        seed: 42,
+        source_image: sourceAssetId,
+      },
     });
-    await importComfyWorkflow(
+    const importedWorkflow = await importComfyWorkflow(
       "Bound portrait",
       { "1": { class_type: "CLIPTextEncode", inputs: { prompt: "" } } },
       [
@@ -888,10 +1505,22 @@ describe("Project Master stream cancellation protocol", () => {
           choices: [],
           description: "Positive prompt",
         },
+        {
+          id: "source_image",
+          nodeId: "3",
+          inputName: "image",
+          valueType: "image_asset",
+          required: true,
+          choices: [],
+          description: "Verified project image",
+        },
       ],
+      "image",
     );
+    expect(importedWorkflow.curatedDefault).toBe(false);
     const [, importInit] = fetchMock.mock.calls[2] as [string, RequestInit];
     expect(JSON.parse(String(importInit.body))).toMatchObject({
+      purpose: "image",
       bindings: [
         {
           id: "prompt",
@@ -899,15 +1528,43 @@ describe("Project Master stream cancellation protocol", () => {
           input_name: "prompt",
           value_type: "string",
         },
+        {
+          id: "source_image",
+          node_id: "3",
+          input_name: "image",
+          value_type: "image_asset",
+        },
       ],
     });
+    const contentController = new AbortController();
     const content = await getComfyArtifactContent(
       "comfy-job-1",
       `comfy-artifact-${"a".repeat(40)}`,
+      contentController.signal,
     );
     expect(await content.text()).toBe("PNGDATA");
     expect(fetchMock.mock.calls[3][0]).toBe(
       `${API_BASE_URL}/integrations/comfyui/jobs/comfy-job-1/artifacts/comfy-artifact-${"a".repeat(40)}/content`,
+    );
+    expect((fetchMock.mock.calls[3][1] as RequestInit).signal).toBe(
+      contentController.signal,
+    );
+    const refreshController = new AbortController();
+    const refreshedJob = await refreshComfyJob(
+      "comfy-job-1",
+      refreshController.signal,
+    );
+    expect(refreshedJob).toMatchObject({
+      id: "comfy-job-1",
+      projectId: "creator-project-1",
+      artifactStatus: "ready",
+    });
+    expect(fetchMock.mock.calls[4][0]).toBe(
+      `${API_BASE_URL}/integrations/comfyui/jobs/comfy-job-1/refresh`,
+    );
+    expect((fetchMock.mock.calls[4][1] as RequestInit).method).toBe("POST");
+    expect((fetchMock.mock.calls[4][1] as RequestInit).signal).toBe(
+      refreshController.signal,
     );
   });
 
@@ -939,6 +1596,126 @@ describe("Project Master stream cancellation protocol", () => {
       base_url: "https://comfy.example.test",
       trusted_hosts: ["comfy.example.test"],
       verify_tls: true,
+    });
+  });
+
+  it("preserves ComfyUI connection health counts", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          profile_id: "local-default",
+          ok: true,
+          device_count: 1,
+          object_type_count: 576,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(getComfyProfileStatus("local-default")).resolves.toEqual({
+      profileId: "local-default",
+      ok: true,
+      deviceCount: 1,
+      objectTypeCount: 576,
+      error: undefined,
+    });
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      `${API_BASE_URL}/integrations/comfyui/profiles/local-default/status`,
+    );
+  });
+
+  it("parses ComfyUI node compatibility without inferring model readiness", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          profile_id: "local/default",
+          workflow_revision_id: "video workflow",
+          compatible: false,
+          missing_node_types: ["VHS_VideoCombine", "WanVideoSampler"],
+          missing_resources: [
+            {
+              node_id: "12",
+              class_type: "UNETLoader",
+              input_name: "unet_name",
+              resource_name: "wan2.2_i2v_high_noise.gguf",
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(
+      getComfyWorkflowCompatibility("local/default", "video workflow"),
+    ).resolves.toEqual({
+      profileId: "local/default",
+      workflowRevisionId: "video workflow",
+      compatible: false,
+      missingNodeTypes: ["VHS_VideoCombine", "WanVideoSampler"],
+      missingResources: [
+        {
+          nodeId: "12",
+          classType: "UNETLoader",
+          inputName: "unet_name",
+          resourceName: "wan2.2_i2v_high_noise.gguf",
+        },
+      ],
+    });
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      `${API_BASE_URL}/integrations/comfyui/workflows/video%20workflow/compatibility/local%2Fdefault`,
+    );
+  });
+
+  it("rejects an unknown ComfyUI workflow purpose", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          revision: {
+            id: "workflow-unknown-purpose",
+            name: "Unknown output",
+            digest: "abc123",
+            purpose: "film",
+            created_at: "2026-07-28T12:00:00Z",
+            bindings: [],
+          },
+          trust_state: "pending",
+        }),
+        { status: 201 },
+      ),
+    );
+
+    await expect(
+      importComfyWorkflow("Unknown output", {}, [], "video"),
+    ).rejects.toThrow("invalid ComfyUI workflow purpose");
+  });
+
+  it("parses every chat-speech artifact in playback order", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          artifact_ids: ["voice-a", "voice-b", "voice-c"],
+          artifact_id: "voice-a",
+          duration_seconds: 18.75,
+        }),
+        { status: 201 },
+      ),
+    );
+
+    await expect(
+      speakMessage(
+        "A message long enough to be rendered in several chunks.",
+        "profile-1",
+      ),
+    ).resolves.toEqual({
+      artifactIds: ["voice-a", "voice-b", "voice-c"],
+      durationSeconds: 18.75,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${API_BASE_URL}/voice/speak`);
+    expect(JSON.parse(String(init.body))).toEqual({
+      text: "A message long enough to be rendered in several chunks.",
+      profile_id: "profile-1",
     });
   });
 
@@ -1086,6 +1863,52 @@ describe("Project Master stream cancellation protocol", () => {
       attested_by_user: true,
       evidence_artifact_ids: ["consent-proof-1"],
     });
+  });
+
+  it("imports WAV references regardless of the platform-reported MIME type", async () => {
+    // Linux shared-mime-info reports audio/vnd.wave for .wav; an allowlist of
+    // audio/wav|x-wav|wave rejected every import on those systems.
+    const platformTypes = ["audio/vnd.wave", "audio/x-pn-wav", ""];
+    for (const type of platformTypes) {
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            artifact_id: "voice-reference-1",
+            sha256: "b".repeat(64),
+            media_type: "audio/wav",
+            duration_seconds: 2.5,
+            sample_rate_hz: 24000,
+            channels: 1,
+            transcript: null,
+          }),
+          { status: 201 },
+        ),
+      );
+      const bytes = new Uint8Array(44);
+      bytes.set([82, 73, 70, 70], 0);
+
+      await expect(
+        importVoiceReference({
+          name: "voice.wav",
+          type,
+          size: bytes.byteLength,
+          arrayBuffer: async () => bytes.buffer,
+        }),
+      ).resolves.toMatchObject({ artifactId: "voice-reference-1" });
+    }
+  });
+
+  it("rejects non-WAV reference files by extension", async () => {
+    const bytes = new Uint8Array(44);
+    await expect(
+      importVoiceReference({
+        name: "voice.mp3",
+        type: "audio/mpeg",
+        size: bytes.byteLength,
+        arrayBuffer: async () => bytes.buffer,
+      }),
+    ).rejects.toThrow("Voice references must be local WAV files.");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("classifies generated WAV references without consent/license evidence", async () => {

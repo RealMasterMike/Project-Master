@@ -108,6 +108,8 @@ def _model() -> CatalogModel:
         size_bytes=1,
         capabilities=frozenset({"completion", "tools"}),
         details=ModelDetails(family="test"),
+        automatic_eligible=True,
+        curated_purposes=frozenset({"dream"}),
     )
 
 

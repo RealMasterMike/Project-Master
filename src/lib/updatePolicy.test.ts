@@ -1,12 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   DAILY_UPDATE_CHECK_INTERVAL_MS,
+  getReleaseChannelLabel,
   getUpdateCheckIntervalMs,
   shouldCheckForUpdates,
   WEEKLY_UPDATE_CHECK_INTERVAL_MS,
 } from "./updatePolicy";
 
 describe("update check schedule", () => {
+  it.each([
+    ["alpha", "Alpha"],
+    ["beta", "Beta"],
+    ["stable", "Stable"],
+  ] as const)("formats the %s release channel for settings", (stage, label) => {
+    expect(getReleaseChannelLabel(stage)).toBe(label);
+  });
+
   it("checks alpha builds once every 24 hours", () => {
     expect(getUpdateCheckIntervalMs("alpha")).toBe(
       DAILY_UPDATE_CHECK_INTERVAL_MS,

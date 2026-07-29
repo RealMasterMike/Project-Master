@@ -1,0 +1,248 @@
+{
+  "bindings": [
+    {
+      "choices": [],
+      "default_value": "A cinematic tracking shot of a red fox walking through a misty pine forest at dawn, natural movement, soft volumetric light, detailed fur, stable camera motion.",
+      "description": "What should happen in the generated video?",
+      "id": "prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "4",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": "oversaturated, overexposed, static, blurry details, subtitles, watermark, painting, still image, gray cast, worst quality, low quality, JPEG artifacts, malformed anatomy, extra limbs, fused details, chaotic background, reverse motion",
+      "description": "Visual qualities to discourage.",
+      "id": "negative_prompt",
+      "input_name": "text",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "5",
+      "required": false,
+      "value_type": "string"
+    },
+    {
+      "choices": [],
+      "default_value": 123456789,
+      "description": "Deterministic generation seed.",
+      "id": "seed",
+      "input_name": "seed",
+      "maximum": 2147483647,
+      "minimum": 0,
+      "node_id": "8",
+      "required": false,
+      "value_type": "integer"
+    },
+    {
+      "choices": [
+        384,
+        512,
+        640,
+        832
+      ],
+      "default_value": 512,
+      "description": "Output width. Larger sizes require more time and memory.",
+      "id": "width",
+      "input_name": "width",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "6",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        224,
+        288,
+        352,
+        480
+      ],
+      "default_value": 288,
+      "description": "Output height. Larger sizes require more time and memory.",
+      "id": "height",
+      "input_name": "height",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "6",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        9,
+        17,
+        33,
+        49,
+        65,
+        81
+      ],
+      "default_value": 33,
+      "description": "Number of generated frames. More frames take longer.",
+      "id": "frames",
+      "input_name": "length",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "6",
+      "required": false,
+      "value_type": "enum"
+    },
+    {
+      "choices": [
+        12,
+        16,
+        24
+      ],
+      "default_value": 16,
+      "description": "Playback frames per second.",
+      "id": "fps",
+      "input_name": "fps",
+      "maximum": null,
+      "minimum": null,
+      "node_id": "10",
+      "required": false,
+      "value_type": "enum"
+    }
+  ],
+  "name": "Wan 2.2 Rapid Mega v12.1 NSFW — local T2V",
+  "purpose": "video",
+  "workflow": {
+    "1": {
+      "class_type": "UnetLoaderGGUF",
+      "inputs": {
+        "unet_name": "wan2.2-rapid-mega-aio-nsfw-v12.1-Q3_K.gguf"
+      }
+    },
+    "2": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "device": "default",
+        "type": "wan"
+      }
+    },
+    "3": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "wan_2.1_vae.safetensors"
+      }
+    },
+    "4": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "2",
+          0
+        ],
+        "text": "A cinematic tracking shot of a red fox walking through a misty pine forest at dawn, natural movement, soft volumetric light, detailed fur, stable camera motion."
+      }
+    },
+    "5": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "clip": [
+          "2",
+          0
+        ],
+        "text": "oversaturated, overexposed, static, blurry details, subtitles, watermark, painting, still image, gray cast, worst quality, low quality, JPEG artifacts, malformed anatomy, extra limbs, fused details, chaotic background, reverse motion"
+      }
+    },
+    "6": {
+      "class_type": "WanVaceToVideo",
+      "inputs": {
+        "batch_size": 1,
+        "height": 288,
+        "length": 33,
+        "negative": [
+          "5",
+          0
+        ],
+        "positive": [
+          "4",
+          0
+        ],
+        "strength": 0,
+        "vae": [
+          "3",
+          0
+        ],
+        "width": 512
+      }
+    },
+    "7": {
+      "class_type": "ModelSamplingSD3",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ],
+        "shift": 8
+      }
+    },
+    "8": {
+      "class_type": "KSampler",
+      "inputs": {
+        "cfg": 1,
+        "denoise": 1,
+        "latent_image": [
+          "6",
+          2
+        ],
+        "model": [
+          "7",
+          0
+        ],
+        "negative": [
+          "6",
+          1
+        ],
+        "positive": [
+          "6",
+          0
+        ],
+        "sampler_name": "dpmpp_sde",
+        "scheduler": "beta",
+        "seed": 123456789,
+        "steps": 4
+      }
+    },
+    "9": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "8",
+          0
+        ],
+        "vae": [
+          "3",
+          0
+        ]
+      }
+    },
+    "10": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "bit_depth": 8,
+        "fps": 16,
+        "images": [
+          "9",
+          0
+        ]
+      }
+    },
+    "11": {
+      "class_type": "SaveVideo",
+      "inputs": {
+        "codec": "h264",
+        "filename_prefix": "ProjectMaster/wan2.2-rapid-mega-v12.1-nsfw",
+        "format": "mp4",
+        "video": [
+          "10",
+          0
+        ]
+      }
+    }
+  }
+}

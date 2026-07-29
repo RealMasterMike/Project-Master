@@ -51,7 +51,7 @@ def register_voice_tools(
                 ],
                 "jobs": [
                     job.model_dump(mode="json")
-                    for job in persistence.list_jobs()
+                    for job in persistence.list_jobs(include_internal=False)
                 ],
             },
         )

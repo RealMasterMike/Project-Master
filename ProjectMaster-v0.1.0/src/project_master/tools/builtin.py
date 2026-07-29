@@ -87,6 +87,7 @@ def build_registry(
         Tool(
             name="workspace_list",
             mutating=False,
+            requires_workspace=True,
             description=(
                 "List files and directories inside the configured Project Master workspace."
             ),
@@ -119,6 +120,7 @@ def build_registry(
         Tool(
             name="workspace_read",
             mutating=False,
+            requires_workspace=True,
             description="Read a UTF-8 text file inside the configured workspace.",
             parameters={
                 "type": "object",
@@ -156,6 +158,7 @@ def build_registry(
         Tool(
             name="workspace_write",
             mutating=True,
+            requires_workspace=True,
             description=(
                 "Write a UTF-8 text file inside the configured workspace when writes are enabled."
             ),

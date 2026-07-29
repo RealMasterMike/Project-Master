@@ -235,7 +235,11 @@ class SQLiteVoiceStore:
             raise KeyError(f"Unknown voice project: {project_id}")
         return VoiceProject.model_validate_json(str(row["payload_json"]))
 
-    def list_projects(self) -> tuple[VoiceProject, ...]:
+    def list_projects(
+        self,
+        *,
+        include_internal: bool = True,
+    ) -> tuple[VoiceProject, ...]:
         with self.store.connection() as conn:
             rows = conn.execute(
                 """
@@ -249,9 +253,12 @@ class SQLiteVoiceStore:
                 ORDER BY project.id
                 """
             ).fetchall()
-        return tuple(
+        projects = tuple(
             VoiceProject.model_validate_json(str(row["payload_json"])) for row in rows
         )
+        if include_internal:
+            return projects
+        return tuple(project for project in projects if project.studio_visible)
 
     def upsert_pack(self, pack: InstalledEnginePack) -> InstalledEnginePack:
         validated = InstalledEnginePack.model_validate(pack.model_dump())
@@ -457,14 +464,21 @@ class SQLiteVoiceStore:
                 )
         return saved.model_copy(deep=True)
 
-    def list_jobs(self) -> tuple[RenderJob, ...]:
+    def list_jobs(
+        self,
+        *,
+        include_internal: bool = True,
+    ) -> tuple[RenderJob, ...]:
         with self.store.connection() as conn:
             rows = conn.execute(
                 "SELECT payload_json FROM voice_render_jobs ORDER BY created_at DESC"
             ).fetchall()
-        return tuple(
+        jobs = tuple(
             RenderJob.model_validate_json(str(row["payload_json"])) for row in rows
         )
+        if include_internal:
+            return jobs
+        return tuple(job for job in jobs if job.studio_visible)
 
     def recover_interrupted_jobs(self) -> int:
         recovered = 0

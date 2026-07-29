@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import pytest
@@ -143,6 +144,11 @@ def test_agent_artifact_tool_lists_verified_local_artifacts(tmp_path) -> None:
     artifact = store.store(download, evidence)
 
     class Service:
+        def job_status(self, job_id: str) -> object:
+            assert job_id == "comfy-job-one"
+            # Rootless chat scope: the job carries no project association either.
+            return SimpleNamespace(project_id=None)
+
         def artifacts(self, job_id: str) -> tuple[object, ...]:
             assert job_id == "comfy-job-one"
             return (artifact,)

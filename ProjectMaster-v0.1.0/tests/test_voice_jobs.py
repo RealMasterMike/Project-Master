@@ -11,7 +11,7 @@ from project_master.integrations.voice.jobs import (
     RenderJobStatus,
 )
 from project_master.integrations.voice.profiles import RenderPurpose
-from project_master.integrations.voice.projects import RenderSettings
+from project_master.integrations.voice.projects import RenderSettings, VoiceWorkflowOrigin
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -102,3 +102,23 @@ def test_interruption_resets_inflight_chunk_for_explicit_resume() -> None:
 
     assert interrupted.chunks[0].status == "pending"
     assert interrupted.chunks[0].attempts == 1
+
+
+def test_legacy_chat_speech_job_is_classified_as_internal() -> None:
+    legacy = RenderJob.new(
+        job_id="voice-job-legacy",
+        project_id="chat-speech-legacy",
+        project_digest="2" * 64,
+        engine_pack_id="pack-1",
+        engine_pack_digest="3" * 64,
+        purpose=RenderPurpose.PRIVATE,
+        settings=RenderSettings(),
+        plans=(plan(),),
+        now=NOW,
+    ).model_dump()
+    legacy.pop("origin")
+
+    restored = RenderJob.model_validate(legacy)
+
+    assert restored.origin is VoiceWorkflowOrigin.CHAT_SPEECH
+    assert restored.studio_visible is False

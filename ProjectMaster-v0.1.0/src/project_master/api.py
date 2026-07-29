@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import logging
@@ -13,7 +14,7 @@ from contextlib import asynccontextmanager, contextmanager, nullcontext
 from dataclasses import asdict
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
@@ -48,8 +49,12 @@ from project_master.integrations.comfyui import (
     ComfyUIProfile,
     ComfyUIService,
     SQLiteComfyStore,
+    StoredWorkflow,
     WorkflowBinding,
+    WorkflowPurpose,
 )
+from project_master.integrations.comfyui.defaults import bundled_workflow_ids
+from project_master.integrations.comfyui.jobs import ComfyJob
 from project_master.integrations.comfyui.jobs import (
     JobConflictError as ComfyJobConflictError,
 )
@@ -60,6 +65,7 @@ from project_master.integrations.comfyui.service import (
     ComfyServiceError,
     UnknownProfileError,
     UnknownWorkflowError,
+    WorkflowIncompatibleError,
 )
 from project_master.integrations.comfyui.workflow import WorkflowValidationError
 from project_master.integrations.voice import (
@@ -76,12 +82,22 @@ from project_master.integrations.voice import (
     VoiceProfile,
     VoiceProject,
     VoiceStudioService,
+    VoiceWorkflowOrigin,
 )
-from project_master.integrations.voice.jobs import RenderJobNotFoundError
+from project_master.integrations.voice.jobs import (
+    RenderJobNotFoundError,
+    RenderJobStatus,
+)
 from project_master.integrations.voice.profiles import VoiceRightsError
 from project_master.integrations.voice.service import VoiceStudioError
 from project_master.knowledge import KnowledgeService
 from project_master.llm.ollama import OllamaError
+from project_master.media import (
+    MediaArtifactError,
+    MediaAssetNotFoundError,
+    MediaKind,
+    create_media_router,
+)
 from project_master.orchestration.models import ProjectSpec, RunSpec
 from project_master.orchestration.store import OrchestrationStore
 from project_master.runtime import (
@@ -90,8 +106,21 @@ from project_master.runtime import (
     resolve_scheduled_dream_sources,
 )
 from project_master.team.models import TeamRole
+from project_master.team.roles import recommend_conversational_model
+from project_master.tools.search import searxng_endpoint
 
 _LOGGER = logging.getLogger(__name__)
+_MAX_CHAT_IMAGE_COUNT = 3
+_MAX_CHAT_IMAGE_BYTES = 20 * 1024 * 1024
+_MAX_CHAT_IMAGE_TOTAL_BYTES = 40 * 1024 * 1024
+ChatImageAssetId = Annotated[
+    str,
+    Field(
+        min_length=44,
+        max_length=44,
+        pattern=r"^media-asset-[0-9a-f]{32}$",
+    ),
+]
 
 
 class ConversationCreate(BaseModel):
@@ -104,7 +133,12 @@ class ChatRequest(BaseModel):
     model: str | None = None
     mode: Literal["direct", "team"] = "direct"
     allow_mutations: bool = False
+    allow_web_search: bool = False
     project_id: str | None = Field(default=None, max_length=160)
+    image_asset_ids: tuple[ChatImageAssetId, ...] = Field(
+        default=(),
+        max_length=_MAX_CHAT_IMAGE_COUNT,
+    )
     request_id: str | None = Field(
         default=None,
         min_length=1,
@@ -133,6 +167,7 @@ class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     root_path: str | None = Field(default=None, max_length=2_000)
     description: str = Field(default="", max_length=4_000)
+    project_type: Literal["general", "creator"] = "general"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -168,6 +203,7 @@ class ComfyWorkflowImportRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     workflow: dict[str, Any]
     bindings: tuple[WorkflowBinding, ...] = ()
+    purpose: WorkflowPurpose = "general"
 
 
 class ComfyWorkflowDecisionRequest(BaseModel):
@@ -178,6 +214,7 @@ class ComfyWorkflowDecisionRequest(BaseModel):
 class ComfyJobCreateRequest(BaseModel):
     profile_id: str = Field(min_length=1, max_length=80)
     workflow_revision_id: str = Field(min_length=1, max_length=160)
+    project_id: str | None = Field(default=None, max_length=160)
     values: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -356,16 +393,58 @@ class VoiceRenderCreateRequest(BaseModel):
     settings: RenderSettings = Field(default_factory=RenderSettings)
 
 
+class VoiceSpeakRequest(BaseModel):
+    """One-shot speech for a single chat message."""
+
+    text: str = Field(min_length=1, max_length=20_000)
+    profile_id: str = Field(min_length=1, max_length=100)
+    engine_pack_id: str | None = Field(default=None, max_length=120)
+    language: str | None = Field(
+        default=None, min_length=2, max_length=35, pattern=r"^[A-Za-z0-9-]+$"
+    )
+
+
+def _comfy_workflow_response(
+    stored: StoredWorkflow,
+    curated_workflow_ids: frozenset[str],
+) -> dict[str, Any]:
+    payload = stored.model_dump(mode="json")
+    payload["curated_default"] = stored.revision.id in curated_workflow_ids
+    return payload
+
+
 def create_app(
     runtime: MasterRuntime | None = None,
     *,
     session_token: str | None = None,
 ) -> FastAPI:
     active = runtime or build_runtime()
+    curated_workflow_ids = bundled_workflow_ids()
     cancellations = StreamCancellationRegistry()
     required_token = session_token
     if required_token is None:
         required_token = os.getenv("MASTER_SESSION_TOKEN")
+
+    def catalog_comfy_artifacts(job: ComfyJob) -> None:
+        if active.media is None or active.comfy is None or job.project_id is None:
+            return
+        for artifact in job.artifacts:
+            try:
+                path = active.comfy.artifact_path(job.id, artifact.id)
+                active.media.import_staged_file(
+                    job.project_id,
+                    path,
+                    file_name=artifact.original_filename,
+                    declared_media_type=artifact.media_type,
+                    source="comfyui",
+                )
+            except Exception as exc:
+                _LOGGER.warning(
+                    "ComfyUI artifact %s could not be cataloged for project %s (%s).",
+                    artifact.id,
+                    job.project_id,
+                    type(exc).__name__,
+                )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -388,6 +467,9 @@ def create_app(
                         profile.id,
                         type(result).__name__,
                     )
+                else:
+                    for job in result:
+                        await asyncio.to_thread(catalog_comfy_artifacts, job)
         active.start_background_services()
         try:
             yield
@@ -423,6 +505,9 @@ def create_app(
             )
         return await call_next(request)
 
+    if active.media is not None:
+        app.include_router(create_media_router(active.media))
+
     def conversation_id(request: ChatRequest) -> str:
         if request.conversation_id:
             if not active.store.session_exists(request.conversation_id):
@@ -437,6 +522,178 @@ def create_app(
                 detail="Durable orchestration is not available in this runtime.",
             )
         return active.orchestration
+
+    def resolve_automatic_chat_model(body: ChatRequest) -> ChatRequest:
+        if body.mode != "direct" or (body.model and body.model.strip()):
+            return body
+        catalog_provider = active.model_catalog
+        if catalog_provider is None and active.team is not None:
+            catalog_provider = active.team.catalog
+        if catalog_provider is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "No curated automatic model can be selected because the installed "
+                    "model catalog is unavailable. Select a model explicitly."
+                ),
+            )
+        try:
+            catalog = catalog_provider.load(refresh=True)
+        except OllamaError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "No curated automatic model can be selected because the installed "
+                    "model catalog could not be refreshed."
+                ),
+            ) from exc
+        purpose = "vision" if body.image_asset_ids else "chat"
+        required_capabilities = (
+            frozenset({"vision"}) if body.image_asset_ids else frozenset()
+        )
+        selected = recommend_conversational_model(
+            catalog,
+            active.config.model,
+            required_purpose=purpose,
+            required_capabilities=required_capabilities,
+        )
+        if selected is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"No installed model matches the curated automatic {purpose} "
+                    "tag and manifest. Select a manual/unverified model explicitly "
+                    "or install the documented default."
+                ),
+            )
+        return body.model_copy(update={"model": selected})
+
+    def resolve_chat_images(body: ChatRequest) -> tuple[str, ...]:
+        if not body.image_asset_ids:
+            return ()
+        if body.mode != "direct":
+            raise HTTPException(
+                status_code=422,
+                detail="Project image analysis is currently available in Direct mode only.",
+            )
+        if body.project_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Select a Creator project before attaching project images.",
+            )
+        project = orchestration().get_project(body.project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if project.get("project_type") != "creator":
+            raise HTTPException(
+                status_code=422,
+                detail="Project image attachments require a Creator project.",
+            )
+        if not body.model or not body.model.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Select an installed vision-capable model before attaching images.",
+            )
+
+        catalog_provider = active.model_catalog
+        if catalog_provider is None and active.team is not None:
+            catalog_provider = active.team.catalog
+        if catalog_provider is None:
+            raise HTTPException(
+                status_code=503,
+                detail="The installed model capability catalog is unavailable.",
+            )
+        try:
+            catalog = catalog_provider.load(refresh=True)
+        except OllamaError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="The installed model capability catalog could not be read.",
+            ) from exc
+        expected_model = body.model.casefold()
+        selected_model = next(
+            (
+                model
+                for model in catalog
+                if any(tag.casefold() == expected_model for tag in model.tags)
+            ),
+            None,
+        )
+        if selected_model is None or not selected_model.has_capability("vision"):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "The selected model is not installed with a reported vision "
+                    "capability."
+                ),
+            )
+        if active.media is None:
+            raise HTTPException(
+                status_code=503,
+                detail="The local Creator Media library is unavailable.",
+            )
+        if len(set(body.image_asset_ids)) != len(body.image_asset_ids):
+            raise HTTPException(
+                status_code=422,
+                detail="Each attached project image must be selected only once.",
+            )
+
+        assets = []
+        total_size = 0
+        for asset_id in body.image_asset_ids:
+            try:
+                asset = active.media.get_project_asset(body.project_id, asset_id)
+            except MediaAssetNotFoundError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="An attached image is not available in the selected project.",
+                ) from exc
+            if asset.kind is not MediaKind.IMAGE:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Only Creator Media image assets can be attached to chat.",
+                )
+            if asset.width is None or asset.height is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="An attached image has no verified dimensions.",
+                )
+            if asset.size_bytes > _MAX_CHAT_IMAGE_BYTES:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Each attached image must be 20 MiB or smaller.",
+                )
+            total_size += asset.size_bytes
+            assets.append(asset)
+        if total_size > _MAX_CHAT_IMAGE_TOTAL_BYTES:
+            raise HTTPException(
+                status_code=422,
+                detail="Attached images must total 40 MiB or less.",
+            )
+
+        encoded: list[str] = []
+        for asset in assets:
+            try:
+                verified_asset, path = active.media.verified_content_path(asset.id)
+                content = path.read_bytes()
+            except (MediaArtifactError, MediaAssetNotFoundError, OSError) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="An attached image failed local integrity verification.",
+                ) from exc
+            digest = hashlib.sha256(content).hexdigest()
+            if (
+                verified_asset.id != asset.id
+                or verified_asset.sha256 != asset.sha256
+                or len(content) != asset.size_bytes
+                or digest != asset.sha256
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="An attached image failed local integrity verification.",
+                )
+            encoded.append(base64.b64encode(content).decode("ascii"))
+        return tuple(encoded)
 
     def comfy_services() -> tuple[ComfyUIService, SQLiteComfyStore]:
         if active.comfy is None or active.comfy_store is None:
@@ -567,10 +824,12 @@ def create_app(
             raise HTTPException(status_code=404, detail="Project not found")
         raw_root = project.get("root_path")
         if not raw_root:
-            raise HTTPException(
-                status_code=422,
-                detail="The selected project does not have a local root path.",
-            )
+            with active.agent.tools.project_scope(
+                project_id,
+                workspace_available=False,
+            ):
+                yield
+            return
         try:
             root = Path(str(raw_root)).expanduser().resolve(strict=True)
         except OSError as exc:
@@ -583,7 +842,13 @@ def create_app(
                 status_code=422,
                 detail="The selected project root is not a directory.",
             )
-        with active.agent.tools.workspace_scope(root):
+        with (
+            active.agent.tools.project_scope(
+                project_id,
+                workspace_available=True,
+            ),
+            active.agent.tools.workspace_scope(root),
+        ):
             yield
 
     def start_direct_run(body: ChatRequest) -> str | None:
@@ -601,10 +866,16 @@ def create_app(
                 metadata={
                     "chat_mode": "direct",
                     "allow_mutations": body.allow_mutations,
+                    "allow_web_search": body.allow_web_search,
                     "tool_authorization": (
                         "explicit_mutations_allowed"
                         if body.allow_mutations
                         else "read_only"
+                    ),
+                    "online_search_authorization": (
+                        "explicit_online_search_allowed"
+                        if body.allow_web_search
+                        else "local_only"
                     ),
                 },
             )
@@ -620,10 +891,16 @@ def create_app(
             {
                 "chat_mode": "direct",
                 "allow_mutations": body.allow_mutations,
+                "allow_web_search": body.allow_web_search,
                 "tool_authorization": (
                     "explicit_mutations_allowed"
                     if body.allow_mutations
                     else "read_only"
+                ),
+                "online_search_authorization": (
+                    "explicit_online_search_allowed"
+                    if body.allow_web_search
+                    else "local_only"
                 ),
             },
         )
@@ -690,14 +967,29 @@ def create_app(
             reachable = False
         payload: dict[str, Any] = {
             "configured_model": active.config.model,
+            "recommended_model": None,
             "num_ctx": active.config.num_ctx,
             "ollama_url": active.config.ollama_url,
             "ollama_reachable": reachable,
             "models": models,
         }
-        if reachable and active.team is not None:
+        catalog_provider = active.model_catalog
+        if catalog_provider is None and active.team is not None:
+            catalog_provider = active.team.catalog
+        if reachable and catalog_provider is not None:
             try:
-                payload["catalog"] = active.team.catalog_status()
+                catalog = catalog_provider.load(refresh=True)
+                payload["catalog"] = [model.to_dict() for model in catalog]
+                role_assigner = (
+                    active.team.council.role_assigner
+                    if active.team is not None
+                    else None
+                )
+                payload["recommended_model"] = recommend_conversational_model(
+                    catalog,
+                    active.config.model,
+                    role_assigner=role_assigner,
+                )
             except OllamaError as exc:
                 payload["catalog"] = []
                 payload["catalog_error"] = str(exc)
@@ -735,10 +1027,14 @@ def create_app(
         }
 
     @app.get("/api/v1/projects")
-    def list_projects(include_archived: bool = False) -> dict[str, Any]:
+    def list_projects(
+        include_archived: bool = False,
+        project_type: Literal["general", "creator"] | None = None,
+    ) -> dict[str, Any]:
         return {
             "projects": orchestration().list_projects(
                 include_archived=include_archived,
+                project_type=project_type,
             )
         }
 
@@ -749,6 +1045,7 @@ def create_app(
                 name=body.name,
                 root_path=body.root_path,
                 description=body.description,
+                project_type=body.project_type,
                 metadata=body.metadata,
             )
         )
@@ -956,6 +1253,7 @@ def create_app(
             "workspace_writes_enabled": active.config.allow_file_writes,
             "default_chat_policy": "read_only",
             "mutating_tools_require_explicit_chat_authorization": True,
+            "external_network_tools_require_explicit_chat_authorization": True,
             "tools": [
                 {
                     **item,
@@ -965,7 +1263,11 @@ def create_app(
                         else (
                             active.config.terminal_enabled
                             if item["name"] == "terminal_run"
-                            else True
+                            else (
+                                searxng_endpoint() is not None
+                                if item["name"] == "web_search"
+                                else True
+                            )
                         )
                     ),
                 }
@@ -990,6 +1292,9 @@ def create_app(
     @app.get("/api/v1/integrations/comfyui")
     def comfy_overview() -> dict[str, Any]:
         service, persistence = comfy_services()
+        jobs = persistence.list()
+        for job in jobs:
+            catalog_comfy_artifacts(job)
         return {
             "support_available": True,
             "profiles": [
@@ -997,12 +1302,12 @@ def create_app(
                 for profile in service.list_profiles()
             ],
             "workflows": [
-                item.model_dump(mode="json")
+                _comfy_workflow_response(item, curated_workflow_ids)
                 for item in persistence.list_workflows()
             ],
             "jobs": [
                 job.model_dump(mode="json")
-                for job in persistence.list()
+                for job in jobs
             ],
         }
 
@@ -1042,18 +1347,19 @@ def create_app(
                 body.name,
                 body.workflow,
                 body.bindings,
+                purpose=body.purpose,
             )
         except WorkflowValidationError as exc:
             raise HTTPException(status_code=422, detail=list(exc.issues)) from exc
         stored = persistence.save_workflow(revision)
-        return stored.model_dump(mode="json")
+        return _comfy_workflow_response(stored, curated_workflow_ids)
 
     @app.get("/api/v1/integrations/comfyui/workflows")
     def list_comfy_workflows() -> dict[str, Any]:
         _service, persistence = comfy_services()
         return {
             "workflows": [
-                item.model_dump(mode="json")
+                _comfy_workflow_response(item, curated_workflow_ids)
                 for item in persistence.list_workflows()
             ]
         }
@@ -1065,7 +1371,7 @@ def create_app(
             stored = persistence.get_workflow(revision_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return stored.model_dump(mode="json")
+        return _comfy_workflow_response(stored, curated_workflow_ids)
 
     @app.post("/api/v1/integrations/comfyui/workflows/{revision_id}/decision")
     def decide_comfy_workflow(
@@ -1081,7 +1387,7 @@ def create_app(
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return stored.model_dump(mode="json")
+        return _comfy_workflow_response(stored, curated_workflow_ids)
 
     @app.get(
         "/api/v1/integrations/comfyui/workflows/{revision_id}/compatibility/{profile_id}"
@@ -1108,6 +1414,8 @@ def create_app(
     @app.post("/api/v1/integrations/comfyui/jobs", status_code=202)
     async def create_comfy_job(body: ComfyJobCreateRequest) -> dict[str, Any]:
         service, persistence = comfy_services()
+        if body.project_id is not None and orchestration().get_project(body.project_id) is None:
+            raise HTTPException(status_code=404, detail="Project not found")
         try:
             workflow = persistence.get_workflow(body.workflow_revision_id)
         except KeyError as exc:
@@ -1122,11 +1430,24 @@ def create_app(
                 body.profile_id,
                 body.workflow_revision_id,
                 body.values,
+                project_id=body.project_id,
             )
         except UnknownProfileError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (WorkflowValidationError, ComfyJobConflictError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except WorkflowIncompatibleError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(exc),
+                    "missing_node_types": list(exc.missing_node_types),
+                    "missing_resources": [
+                        item.model_dump(mode="json")
+                        for item in exc.missing_resources
+                    ],
+                },
+            ) from exc
         except ComfyServiceError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return job.model_dump(mode="json")
@@ -1162,6 +1483,7 @@ def create_app(
                 status_code=503,
                 detail=f"ComfyUI refresh failed ({type(exc).__name__}).",
             ) from exc
+        await asyncio.to_thread(catalog_comfy_artifacts, job)
         return job.model_dump(mode="json")
 
     @app.post("/api/v1/integrations/comfyui/jobs/{job_id}/cancel")
@@ -1173,6 +1495,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ComfyServiceError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await asyncio.to_thread(catalog_comfy_artifacts, job)
         return job.model_dump(mode="json")
 
     @app.get(
@@ -1511,7 +1834,8 @@ def create_app(
                 for item in persistence.list_references()
             ],
             "jobs": [
-                item.model_dump(mode="json") for item in persistence.list_jobs()
+                item.model_dump(mode="json")
+                for item in persistence.list_jobs(include_internal=False)
             ],
             "artifacts": [
                 item.model_dump(mode="json")
@@ -1677,12 +2001,128 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return job.model_dump(mode="json")
 
+    @app.post("/api/v1/voice/speak", status_code=201)
+    async def speak_voice_text(body: VoiceSpeakRequest) -> dict[str, Any]:
+        """Render one chat message with a saved voice profile.
+
+        Chat needs a single line spoken, not an authored project, so this wraps
+        the text in a content-addressed one-block project and reuses the normal
+        job pipeline. That keeps consent enforcement, chunking, the chunk cache
+        and the shared GPU lease identical to Voice Studio renders — speaking
+        the same text in the same voice twice is a cache hit rather than a
+        second synthesis.
+        """
+        service, persistence = voice_services()
+        try:
+            profile = persistence.get_profile(body.profile_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail=f"Unknown voice profile '{body.profile_id}'."
+            ) from exc
+
+        pack_id = body.engine_pack_id
+        language = body.language or profile.language
+        if pack_id is None:
+            required = (
+                "reference_voice" if profile.mode == "reference" else "voice_design"
+            )
+            pack = next(
+                (
+                    item
+                    for item in service.list_packs()
+                    if required in item.capabilities
+                ),
+                None,
+            )
+            if pack is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"No installed voice engine provides '{required}' for "
+                        f"profile '{body.profile_id}'."
+                    ),
+                )
+            pack_id = pack.id
+
+        digest = hashlib.sha256(
+            f"{body.profile_id}\x00{language}\x00{body.text}".encode()
+        ).hexdigest()
+        project_id = f"chat-speech-{digest[:32]}"
+        try:
+            # Speaking the same line twice must resolve to the identical
+            # project. A fresh created_at would change the project digest and
+            # collide with the stored revision, so reuse what is already there.
+            saved_project = persistence.get_project(project_id)
+        except KeyError:
+            try:
+                project = VoiceProject.create(
+                    project_id=project_id,
+                    name="Chat speech",
+                    language=language,
+                    default_voice_profile_id=body.profile_id,
+                    blocks=[
+                        ScriptBlock(
+                            id="message",
+                            text=body.text,
+                            voice_profile_id=body.profile_id,
+                        )
+                    ],
+                    origin=VoiceWorkflowOrigin.CHAT_SPEECH,
+                    created_at=datetime.now(UTC),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            saved_project = persistence.save_project(project)
+        service.upsert_project(saved_project)
+
+        try:
+            job = service.create_render_job(
+                project_id=saved_project.id,
+                engine_pack_id=pack_id,
+                purpose=RenderPurpose.PRIVATE,
+                allow_internal=True,
+            )
+            job = await service.run_job(job.id, allow_internal=True)
+        except VoiceRightsError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except VoiceStudioError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        if job.status is not RenderJobStatus.SUCCEEDED:
+            raise HTTPException(
+                status_code=409,
+                detail=job.error or f"Speech render ended as {job.status.value}.",
+            )
+        artifact_ids = [
+            chunk.artifact_id for chunk in job.chunks if chunk.artifact_id is not None
+        ]
+        if not artifact_ids:
+            raise HTTPException(
+                status_code=409, detail="Speech render produced no audio artifact."
+            )
+        # Long messages are split across several chunks. Report the whole set and
+        # the summed duration; a caller that plays only the first artifact would
+        # silently stop partway through the message.
+        artifacts = [persistence.get_artifact(item) for item in artifact_ids]
+        total_duration = sum(
+            item.duration_seconds for item in artifacts if item is not None
+        )
+        return {
+            "job_id": job.id,
+            "profile_id": body.profile_id,
+            "engine_pack_id": pack_id,
+            "artifact_ids": artifact_ids,
+            "artifact_id": artifact_ids[0],
+            "duration_seconds": total_duration or None,
+        }
+
     @app.get("/api/v1/voice/jobs")
     def list_voice_jobs() -> dict[str, Any]:
         _service, persistence = voice_services()
         return {
             "jobs": [
-                job.model_dump(mode="json") for job in persistence.list_jobs()
+                job.model_dump(mode="json")
+                for job in persistence.list_jobs(include_internal=False)
             ]
         }
 
@@ -1758,6 +2198,8 @@ def create_app(
 
     @app.post("/api/v1/chat")
     def chat(body: ChatRequest) -> dict[str, Any]:
+        body = resolve_automatic_chat_model(body)
+        images = resolve_chat_images(body)
         session_id = conversation_id(body)
         context = knowledge_context(body)
         direct_run_id = start_direct_run(body) if body.mode == "direct" else None
@@ -1772,6 +2214,7 @@ def create_app(
                         supplemental_context=context,
                         project_id=body.project_id,
                         allow_mutations=body.allow_mutations,
+                        allow_web_search=body.allow_web_search,
                     )
                     if not team_response.answer:
                         raise HTTPException(
@@ -1791,6 +2234,8 @@ def create_app(
                         body.message,
                         supplemental_context=context,
                         allow_mutations=body.allow_mutations,
+                        allow_web_search=body.allow_web_search,
+                        images=images,
                     )
                     team_payload = None
             finish_direct_run(direct_run_id, "complete")
@@ -1816,16 +2261,24 @@ def create_app(
             "tool_authorization": {
                 "chat_mode": body.mode,
                 "allow_mutations": body.allow_mutations,
+                "allow_web_search": body.allow_web_search,
                 "policy": (
                     "explicit_mutations_allowed"
                     if body.allow_mutations
                     else "read_only"
+                ),
+                "online_search_policy": (
+                    "explicit_online_search_allowed"
+                    if body.allow_web_search
+                    else "local_only"
                 ),
             },
         }
 
     @app.post("/api/v1/chat/stream")
     def chat_stream(body: ChatRequest) -> StreamingResponse:
+        body = resolve_automatic_chat_model(body)
+        images = resolve_chat_images(body)
         request_id = body.request_id or str(uuid4())
         try:
             cancellation = cancellations.register(request_id)
@@ -1868,33 +2321,50 @@ def create_app(
                         "request_id": request_id,
                         "mode": body.mode,
                         "allow_mutations": body.allow_mutations,
+                        "allow_web_search": body.allow_web_search,
                         "tool_authorization": (
                             "explicit_mutations_allowed"
                             if body.allow_mutations
                             else "read_only"
                         ),
+                        "online_search_authorization": (
+                            "explicit_online_search_allowed"
+                            if body.allow_web_search
+                            else "local_only"
+                        ),
                     }
                 )
-                with project_tool_scope(body.project_id):
-                    if body.mode == "team" and active.team is not None:
-                        stream = active.team.respond_stream(
-                            session_id,
-                            body.message,
-                            preferred_lead=body.model,
-                            cancellation=cancellation,
-                            supplemental_context=context,
-                            project_id=body.project_id,
-                            allow_mutations=body.allow_mutations,
-                        )
+                if body.mode == "team" and active.team is not None:
+                    stream = active.team.respond_stream(
+                        session_id,
+                        body.message,
+                        preferred_lead=body.model,
+                        cancellation=cancellation,
+                        supplemental_context=context,
+                        project_id=body.project_id,
+                        allow_mutations=body.allow_mutations,
+                        allow_web_search=body.allow_web_search,
+                    )
+                else:
+                    stream = active.agent_for_model(body.model).respond_stream(
+                        session_id,
+                        body.message,
+                        cancellation=cancellation,
+                        supplemental_context=context,
+                        allow_mutations=body.allow_mutations,
+                        allow_web_search=body.allow_web_search,
+                        images=images,
+                    )
+                stream_iterator = iter(stream)
+                while True:
+                    try:
+                        # A Starlette response generator can resume in another execution
+                        # context. Keep request-local project ContextVars inside one advance.
+                        with project_tool_scope(body.project_id):
+                            event = next(stream_iterator)
+                    except StopIteration:
+                        break
                     else:
-                        stream = active.agent_for_model(body.model).respond_stream(
-                            session_id,
-                            body.message,
-                            cancellation=cancellation,
-                            supplemental_context=context,
-                            allow_mutations=body.allow_mutations,
-                        )
-                    for event in stream:
                         if event["type"] == "done":
                             event["conversation_id"] = session_id
                             event["audit"] = [
@@ -1905,10 +2375,16 @@ def create_app(
                             event["tool_authorization"] = {
                                 "chat_mode": body.mode,
                                 "allow_mutations": body.allow_mutations,
+                                "allow_web_search": body.allow_web_search,
                                 "policy": (
                                     "explicit_mutations_allowed"
                                     if body.allow_mutations
                                     else "read_only"
+                                ),
+                                "online_search_policy": (
+                                    "explicit_online_search_allowed"
+                                    if body.allow_web_search
+                                    else "local_only"
                                 ),
                             }
                             finish_direct_run(direct_run_id, "complete")

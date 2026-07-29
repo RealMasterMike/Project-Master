@@ -132,6 +132,8 @@ def _model() -> CatalogModel:
         size_bytes=1,
         capabilities=frozenset({"completion", "tools"}),
         details=ModelDetails(family="test"),
+        automatic_eligible=True,
+        curated_purposes=frozenset({"dream"}),
     )
 
 
@@ -468,6 +470,7 @@ def test_project_consent_and_enabled_schedule_readiness_contract(
         assert enabled.json()["metadata"] == {
             "owner": "mike",
             "allow_dreaming": True,
+            "project_type": "general",
         }
         disabled = client.post(
             f"/api/v1/projects/{active_project}/dreaming",
@@ -478,6 +481,7 @@ def test_project_consent_and_enabled_schedule_readiness_contract(
         assert disabled.json()["metadata"] == {
             "owner": "mike",
             "allow_dreaming": False,
+            "project_type": "general",
         }
         assert (
             client.post(
@@ -768,7 +772,10 @@ def test_foreground_chat_preempts_a_running_dream(tmp_path: Path) -> None:
         run_id = queued.json()["run"]["run_id"]
         assert runner.entered.wait(1)
 
-        chatted = client.post("/api/v1/chat", json={"message": "Need an answer now."})
+        chatted = client.post(
+            "/api/v1/chat",
+            json={"message": "Need an answer now.", "model": "test-model"},
+        )
 
         assert chatted.status_code == 200
         assert chatted.json()["message"] == "Foreground response"

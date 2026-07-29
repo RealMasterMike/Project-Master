@@ -240,6 +240,7 @@ def register_terminal_tool(
         Tool(
             name="terminal_run",
             mutating=True,
+            requires_workspace=True,
             description=(
                 "Run one argv-only command inside the Project Master workspace sandbox. Shell "
                 "operators, host paths, background processes, and network access are unavailable."

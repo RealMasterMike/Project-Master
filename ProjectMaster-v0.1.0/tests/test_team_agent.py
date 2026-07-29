@@ -6,6 +6,7 @@ from project_master.agent import ProjectMasterAgent
 from project_master.core.cancellation import CancellationToken
 from project_master.core.models import Message
 from project_master.core.prompting import PromptBuilder
+from project_master.llm.curated import CURATED_MODEL_IDENTITIES
 from project_master.memory.store import SQLiteStore
 from project_master.orchestration.models import ProjectSpec
 from project_master.orchestration.store import OrchestrationStore
@@ -13,28 +14,36 @@ from project_master.personality.profile import StyleProfiler
 from project_master.team.agent import ProjectMasterTeam
 from project_master.team.catalog import OllamaModelCatalog
 from project_master.team.council import SequentialCouncil
+from project_master.tools.base import Tool
 from project_master.tools.builtin import build_registry
+
+_CHAT_IDENTITY = CURATED_MODEL_IDENTITIES[0]
+_VISION_IDENTITY = CURATED_MODEL_IDENTITIES[1]
 
 
 class CatalogProvider:
     def list_models(self) -> list[dict[str, Any]]:
         return [
             {
-                "name": "lead",
-                "digest": "lead-digest",
+                "name": _CHAT_IDENTITY.tag,
+                "digest": _CHAT_IDENTITY.manifest_digest,
                 "size": 8_000,
                 "details": {"family": "gemma"},
             },
             {
-                "name": "worker",
-                "digest": "worker-digest",
+                "name": _VISION_IDENTITY.tag,
+                "digest": _VISION_IDENTITY.manifest_digest,
                 "size": 4_000,
                 "details": {"family": "llama"},
             },
         ]
 
     def show_model(self, model: str) -> dict[str, Any]:
-        capabilities = ["completion", "tools"] if model == "lead" else ["completion"]
+        capabilities = (
+            ["completion", "tools"]
+            if model == _CHAT_IDENTITY.tag
+            else ["completion", "vision"]
+        )
         return {"capabilities": capabilities, "details": {"family": "test"}}
 
 
@@ -54,7 +63,7 @@ class AdvisoryProvider:
 
 
 class ToolLeadProvider:
-    model = "lead"
+    model = _CHAT_IDENTITY.tag
 
     def __init__(self) -> None:
         self.round = 0
@@ -62,7 +71,11 @@ class ToolLeadProvider:
         self.seen_tool_names: list[set[str]] = []
 
     def health(self) -> dict[str, Any]:
-        return {"ok": True, "models": ["lead", "worker"], "configured_model": "lead"}
+        return {
+            "ok": True,
+            "models": [_CHAT_IDENTITY.tag, _VISION_IDENTITY.tag],
+            "configured_model": _CHAT_IDENTITY.tag,
+        }
 
     def chat(self, messages: list[Message], tools: list[dict[str, Any]] | None = None) -> Message:
         self.seen_tool_names.append(
@@ -105,9 +118,23 @@ def test_team_stream_is_durable_tool_safe_and_final_only(tmp_path: Path) -> None
     orchestration = OrchestrationStore(sqlite)
     profiler = StyleProfiler(sqlite)
     lead_provider = ToolLeadProvider()
+    tools = build_registry(sqlite, tmp_path / "workspace")
+    tools.register(
+        Tool(
+            name="network_probe",
+            description="Test-only external network tool.",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=lambda _args: {"ok": True},
+            external_network=True,
+        )
+    )
     agent = ProjectMasterAgent(
         provider=lead_provider,
-        tools=build_registry(sqlite, tmp_path / "workspace"),
+        tools=tools,
         store=sqlite,
         profiler=profiler,
         prompt_builder=PromptBuilder(),
@@ -121,7 +148,7 @@ def test_team_stream_is_durable_tool_safe_and_final_only(tmp_path: Path) -> None
         agent_factory=lambda _model: agent,
         orchestration=orchestration,
         workspace_root=tmp_path / "workspace",
-        configured_model="lead",
+        configured_model=_CHAT_IDENTITY.tag,
     )
     session_id = sqlite.create_session("Team test")
     selected_project_id = orchestration.create_project(
@@ -132,7 +159,7 @@ def test_team_stream_is_durable_tool_safe_and_final_only(tmp_path: Path) -> None
         team.respond_stream(
             session_id,
             "What is 2 + 2?",
-            preferred_lead="lead",
+            preferred_lead=_CHAT_IDENTITY.tag,
             project_id=selected_project_id,
         )
     )
@@ -149,6 +176,10 @@ def test_team_stream_is_durable_tool_safe_and_final_only(tmp_path: Path) -> None
     assert lead_provider.seen_supplemental
     assert all(
         "workspace_write" not in tool_names
+        for tool_names in lead_provider.seen_tool_names
+    )
+    assert all(
+        "network_probe" not in tool_names
         for tool_names in lead_provider.seen_tool_names
     )
     assert sqlite.recent_messages(session_id) == [
@@ -172,7 +203,7 @@ def test_team_stream_is_durable_tool_safe_and_final_only(tmp_path: Path) -> None
         team.respond_stream(
             authorized_session,
             "You may update the selected project.",
-            preferred_lead="lead",
+            preferred_lead=_CHAT_IDENTITY.tag,
             project_id=selected_project_id,
             allow_mutations=True,
         )
@@ -191,3 +222,32 @@ def test_team_stream_is_durable_tool_safe_and_final_only(tmp_path: Path) -> None
         if role["role"] == "lead"
     )
     assert "registered_mutating_tools" in lead_role["permissions"]
+
+    lead_provider.round = 0
+    prior_schema_count = len(lead_provider.seen_tool_names)
+    online_session = sqlite.create_session("Online-search authorized team test")
+    online_events = list(
+        team.respond_stream(
+            online_session,
+            "You may use online search.",
+            preferred_lead=_CHAT_IDENTITY.tag,
+            project_id=selected_project_id,
+            allow_web_search=True,
+        )
+    )
+
+    assert online_events[-1]["type"] == "done"
+    online_schemas = lead_provider.seen_tool_names[prior_schema_count:]
+    assert online_schemas
+    assert all("network_probe" in tool_names for tool_names in online_schemas)
+    online_run = orchestration.list_runs(selected_project_id)[0]
+    assert online_run["metadata"]["allow_web_search"] is True
+    assert online_run["metadata"]["online_search_authorization"] == (
+        "explicit_online_search_allowed"
+    )
+    online_lead = next(
+        role
+        for role in orchestration.list_roles(online_run["id"])
+        if role["role"] == "lead"
+    )
+    assert "registered_external_network_tools" in online_lead["permissions"]

@@ -12,6 +12,8 @@ from project_master.integrations.comfyui.profiles import (
     SecretRef,
 )
 from project_master.integrations.comfyui.transport import (
+    COMFY_INPUT_SUBFOLDER,
+    MAX_COMFY_INPUT_IMAGE_BYTES,
     ComfyProtocolError,
     ComfyTransportError,
     HttpxComfyTransport,
@@ -233,6 +235,44 @@ def test_websocket_progress_is_normalized_but_remains_advisory() -> None:
         normalize_comfy_event({"type": "progress", "data": {"value": 1, "max": 0}})
 
 
+def test_free_models_and_memory_uses_official_bounded_profile_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    monkeypatch.setenv("COMFY_FREE_TEST_TOKEN", "free-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+    transport = HttpxComfyTransport(
+        ComfyUIProfile(
+            id="local",
+            name="Local",
+            auth=ComfyAuth(secret_ref=SecretRef(key="COMFY_FREE_TEST_TOKEN")),
+        ),
+        client=client,
+    )
+
+    async def exercise() -> None:
+        await transport.free_models_and_memory()
+        await client.aclose()
+
+    asyncio.run(exercise())
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.method == "POST"
+    assert request.url == httpx.URL("http://127.0.0.1:8188/free")
+    assert request.headers["authorization"] == "Bearer free-secret"
+    assert request.headers["content-type"] == "application/json"
+    assert request.read() == b'{"unload_models":true,"free_memory":true}'
+
+
 class ChunkedStream(httpx.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b"123"
@@ -377,3 +417,188 @@ def test_output_download_refuses_cross_origin_redirect_without_following_it() ->
     asyncio.run(exercise())
     assert len(requests) == 1
     assert requests[0].url.host == "127.0.0.1"
+
+
+def test_input_upload_uses_official_multipart_route_auth_and_fixed_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[httpx.Request, bytes]] = []
+    monkeypatch.setenv("COMFY_INPUT_TEST_TOKEN", "upload-secret")
+    filename = f"{'a' * 64}.png"
+    content = b"\x89PNG\r\n\x1a\nverified-image"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request, request.read()))
+        return httpx.Response(
+            200,
+            json={
+                "name": filename,
+                "subfolder": COMFY_INPUT_SUBFOLDER,
+                "type": "input",
+            },
+            request=request,
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+    transport = HttpxComfyTransport(
+        ComfyUIProfile(
+            id="local",
+            name="Local",
+            auth=ComfyAuth(secret_ref=SecretRef(key="COMFY_INPUT_TEST_TOKEN")),
+        ),
+        client=client,
+    )
+
+    async def exercise() -> None:
+        uploaded = await transport.upload_image(
+            content,
+            filename=filename,
+            media_type="image/png",
+        )
+        assert uploaded.relative_locator == f"{COMFY_INPUT_SUBFOLDER}/{filename}"
+        await client.aclose()
+
+    asyncio.run(exercise())
+
+    assert len(requests) == 1
+    request, body = requests[0]
+    assert request.url.path == "/upload/image"
+    assert request.headers["authorization"] == "Bearer upload-secret"
+    assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
+    assert f'filename="{filename}"'.encode() in body
+    assert b"Content-Type: image/png" in body
+    assert b'name="type"\r\n\r\ninput\r\n' in body
+    assert f'name="subfolder"\r\n\r\n{COMFY_INPUT_SUBFOLDER}\r\n'.encode() in body
+    assert b'name="overwrite"\r\n\r\nfalse\r\n' in body
+    assert content in body
+
+
+def test_input_upload_enforces_configured_size_before_network_io() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500, request=request)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+    transport = HttpxComfyTransport(
+        ComfyUIProfile(id="local", name="Local"),
+        client=client,
+        max_input_image_bytes=5,
+    )
+
+    async def exercise() -> None:
+        with pytest.raises(ComfyProtocolError, match="size limit"):
+            await transport.upload_image(
+                b"123456",
+                filename=f"{'a' * 64}.png",
+                media_type="image/png",
+            )
+        await client.aclose()
+
+    asyncio.run(exercise())
+    assert requests == []
+
+
+def test_input_upload_limit_cannot_be_configured_above_official_limit() -> None:
+    with pytest.raises(ValueError, match="official 50 MiB limit"):
+        HttpxComfyTransport(
+            ComfyUIProfile(id="local", name="Local"),
+            max_input_image_bytes=MAX_COMFY_INPUT_IMAGE_BYTES + 1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "name": "../../secret.png",
+                "subfolder": COMFY_INPUT_SUBFOLDER,
+                "type": "input",
+            },
+            "unsafe input locator",
+        ),
+        (
+            {
+                "name": f"{'a' * 64}.png",
+                "subfolder": "someone-else",
+                "type": "input",
+            },
+            "unexpected input subfolder",
+        ),
+        (
+            {
+                "name": f"{'a' * 64}.png",
+                "subfolder": COMFY_INPUT_SUBFOLDER,
+                "type": "output",
+            },
+            "unsafe input locator",
+        ),
+    ],
+)
+def test_input_upload_rejects_untrusted_server_locators(
+    payload: dict[str, str],
+    message: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload, request=request)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+    transport = HttpxComfyTransport(
+        ComfyUIProfile(id="local", name="Local"),
+        client=client,
+    )
+
+    async def exercise() -> None:
+        with pytest.raises(ComfyProtocolError, match=message):
+            await transport.upload_image(
+                b"image",
+                filename=f"{'a' * 64}.png",
+                media_type="image/png",
+            )
+        await client.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_input_upload_refuses_redirect_without_following_it() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            302,
+            headers={"location": "http://169.254.169.254/latest/meta-data"},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+    transport = HttpxComfyTransport(
+        ComfyUIProfile(id="local", name="Local"),
+        client=client,
+    )
+
+    async def exercise() -> None:
+        with pytest.raises(ComfyTransportError, match="redirects"):
+            await transport.upload_image(
+                b"image",
+                filename=f"{'a' * 64}.png",
+                media_type="image/png",
+            )
+        await client.aclose()
+
+    asyncio.run(exercise())
+    assert len(requests) == 1

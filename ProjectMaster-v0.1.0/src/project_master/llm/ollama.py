@@ -18,6 +18,14 @@ class OllamaError(RuntimeError):
     pass
 
 
+_VISIBLE_RESPONSE_RECOVERY_INSTRUCTION = (
+    "The previous generation ended before producing any user-visible output. "
+    "Answer the original request now with only the visible answer, without private "
+    "reasoning or a preamble. If a tool is required, use a structured tool call."
+)
+_VISIBLE_RESPONSE_ATTEMPTS = 2
+
+
 class _ModelResidency:
     """Process-local ownership of the last Ollama model used by Project Master."""
 
@@ -32,7 +40,7 @@ class OllamaClient:
         base_url: str,
         model: str,
         temperature: float = 0.3,
-        num_ctx: int = 8192,
+        num_ctx: int = 65536,
         max_output_tokens: int = 2048,
         timeout_seconds: float = 180.0,
         *,
@@ -222,6 +230,29 @@ class OllamaClient:
         models = [item.get("name", item.get("model", "")) for item in self.list_models()]
         return {"ok": True, "models": models, "configured_model": self.model}
 
+    def _visible_response_retry_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build one bounded retry after a generation produced no public output."""
+        retry_payload = dict(payload)
+        retry_payload["messages"] = [
+            *payload["messages"],
+            {
+                # A final user nudge works across more custom GGUF chat templates
+                # than a system message placed after the original user turn.
+                "role": "user",
+                "content": _VISIBLE_RESPONSE_RECOVERY_INSTRUCTION,
+            },
+        ]
+        retry_payload["options"] = {
+            **payload["options"],
+            # A reasoning model may have consumed the first allowance privately.
+            # Give the single recovery attempt enough room to reach its public answer.
+            "num_predict": min(self.max_output_tokens * 2, 32_768),
+        }
+        return retry_payload
+
     def chat(
         self,
         messages: list[Message],
@@ -244,42 +275,51 @@ class OllamaClient:
         if tools and self.supports_tools():
             payload["tools"] = tools
 
-        try:
-            with self._model_residency_scope():
-                response = httpx.post(
-                    f"{self.base_url}/api/chat",
-                    json=payload,
-                    timeout=self.timeout_seconds,
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:1000]
-            raise OllamaError(f"Ollama returned HTTP {exc.response.status_code}: {body}") from exc
-        except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise OllamaError(f"Ollama request failed: {exc}") from exc
-
-        raw_message = data.get("message")
-        if not isinstance(raw_message, dict):
-            raise OllamaError("Ollama response did not contain a valid message")
-        tool_calls = raw_message.get("tool_calls") or []
-        if not isinstance(tool_calls, list):
-            tool_calls = []
-        content = str(raw_message.get("content", ""))
-        if (
-            str(raw_message.get("thinking", "")).strip()
-            and not content.strip()
-            and not tool_calls
-        ):
-            raise OllamaError(
-                "Ollama returned private thinking but no visible response or tool call; "
-                "the bounded output budget may have been exhausted."
+        for attempt in range(_VISIBLE_RESPONSE_ATTEMPTS):
+            request_payload = (
+                payload
+                if attempt == 0
+                else self._visible_response_retry_payload(payload)
             )
-        return Message(
-            role="assistant",
-            content=content,
-            tool_calls=tool_calls,
-        )
+            try:
+                with self._model_residency_scope():
+                    response = httpx.post(
+                        f"{self.base_url}/api/chat",
+                        json=request_payload,
+                        timeout=self.timeout_seconds,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+            except httpx.HTTPStatusError as exc:
+                body = exc.response.text[:1000]
+                raise OllamaError(
+                    f"Ollama returned HTTP {exc.response.status_code}: {body}"
+                ) from exc
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                raise OllamaError(f"Ollama request failed: {exc}") from exc
+
+            if not isinstance(data, dict):
+                raise OllamaError("Ollama response did not contain a valid object")
+            raw_message = data.get("message")
+            if not isinstance(raw_message, dict):
+                raise OllamaError("Ollama response did not contain a valid message")
+            tool_calls = raw_message.get("tool_calls") or []
+            if not isinstance(tool_calls, list):
+                tool_calls = []
+            content = str(raw_message.get("content", ""))
+            private_thinking = bool(str(raw_message.get("thinking", "")).strip())
+            if not content.strip() and not tool_calls:
+                if attempt + 1 < _VISIBLE_RESPONSE_ATTEMPTS:
+                    continue
+                return _missing_visible_response_message(private_thinking)
+            return Message(
+                role="assistant",
+                content=content,
+                tool_calls=tool_calls,
+                finish_reason=_finish_reason(data),
+            )
+
+        raise OllamaError("Ollama did not produce a visible response")
 
     def chat_stream(
         self,
@@ -306,68 +346,155 @@ class OllamaClient:
         if tools and self.supports_tools():
             payload["tools"] = tools
 
-        saw_private_thinking = False
-        saw_visible_output = False
-        try:
-            with self._model_residency_scope():
-                with httpx.stream(
-                    "POST",
-                    f"{self.base_url}/api/chat",
-                    json=payload,
-                    timeout=self.timeout_seconds,
-                ) as response:
-                    close_response = response.close
-                    if cancellation is not None:
-                        cancellation.bind_closer(close_response)
-                    response.raise_for_status()
-                    for line in response.iter_lines():
-                        if cancellation is not None and cancellation.cancelled:
-                            return
-                        if not line.strip():
-                            continue
-                        data = json.loads(line)
-                        if error := data.get("error"):
-                            raise OllamaError(f"Ollama streaming error: {error}")
-                        raw_message = data.get("message") or {}
-                        tool_calls = raw_message.get("tool_calls") or []
-                        if not isinstance(tool_calls, list):
-                            tool_calls = []
-                        content = str(raw_message.get("content", ""))
-                        saw_private_thinking = (
-                            saw_private_thinking
-                            or bool(str(raw_message.get("thinking", "")).strip())
-                        )
-                        saw_visible_output = (
-                            saw_visible_output
-                            or bool(content.strip())
-                            or bool(tool_calls)
-                        )
-                        yield Message(
-                            role="assistant",
-                            content=content,
-                            tool_calls=tool_calls,
-                        )
-                        if data.get("done") is True:
-                            if saw_private_thinking and not saw_visible_output:
+        for attempt in range(_VISIBLE_RESPONSE_ATTEMPTS):
+            request_payload = (
+                payload
+                if attempt == 0
+                else self._visible_response_retry_payload(payload)
+            )
+            saw_private_thinking = False
+            saw_visible_output = False
+            saw_terminal = False
+            retry_without_output = False
+            close_response: Any = None
+            try:
+                with self._model_residency_scope():
+                    with httpx.stream(
+                        "POST",
+                        f"{self.base_url}/api/chat",
+                        json=request_payload,
+                        timeout=self.timeout_seconds,
+                    ) as response:
+                        close_response = response.close
+                        if cancellation is not None:
+                            cancellation.bind_closer(close_response)
+                        try:
+                            response.raise_for_status()
+                        except httpx.HTTPStatusError:
+                            # Streaming responses are not buffered. Read an error
+                            # body while the response context is still open so the
+                            # outer handler can report Ollama's real detail instead
+                            # of raising httpx.ResponseNotRead.
+                            response.read()
+                            raise
+                        for line in response.iter_lines():
+                            if cancellation is not None and cancellation.cancelled:
+                                return
+                            if not line.strip():
+                                continue
+                            data = json.loads(line)
+                            if not isinstance(data, dict):
                                 raise OllamaError(
-                                    "Ollama returned private thinking but no visible response or "
-                                    "tool call; the bounded output budget may have been exhausted."
+                                    "Ollama stream did not contain a valid object"
                                 )
-                            return
-        except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:1000]
-            raise OllamaError(f"Ollama returned HTTP {exc.response.status_code}: {body}") from exc
-        except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            if cancellation is not None and cancellation.cancelled:
+                            if error := data.get("error"):
+                                raise OllamaError(f"Ollama streaming error: {error}")
+                            raw_message = data.get("message") or {}
+                            if not isinstance(raw_message, dict):
+                                raw_message = {}
+                            tool_calls = raw_message.get("tool_calls") or []
+                            if not isinstance(tool_calls, list):
+                                tool_calls = []
+                            content = str(raw_message.get("content", ""))
+                            saw_private_thinking = (
+                                saw_private_thinking
+                                or bool(str(raw_message.get("thinking", "")).strip())
+                            )
+                            saw_visible_output = (
+                                saw_visible_output
+                                or bool(content.strip())
+                                or bool(tool_calls)
+                            )
+                            done = data.get("done") is True
+                            saw_terminal = saw_terminal or done
+                            if done and not saw_visible_output:
+                                if attempt + 1 < _VISIBLE_RESPONSE_ATTEMPTS:
+                                    retry_without_output = True
+                                    break
+                                yield _missing_visible_response_message(
+                                    saw_private_thinking
+                                )
+                                return
+                            if content or tool_calls or done:
+                                yield Message(
+                                    role="assistant",
+                                    content=content,
+                                    tool_calls=tool_calls,
+                                    finish_reason=(
+                                        _finish_reason(data) if done else None
+                                    ),
+                                )
+                            if done:
+                                return
+            except httpx.HTTPStatusError as exc:
+                body = exc.response.text[:1000]
+                raise OllamaError(
+                    f"Ollama returned HTTP {exc.response.status_code}: {body}"
+                ) from exc
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                if cancellation is not None and cancellation.cancelled:
+                    return
+                raise OllamaError(f"Ollama streaming request failed: {exc}") from exc
+            finally:
+                if cancellation is not None and close_response is not None:
+                    cancellation.unbind_closer(close_response)
+            if retry_without_output:
+                continue
+            if not saw_visible_output:
+                if attempt + 1 < _VISIBLE_RESPONSE_ATTEMPTS:
+                    continue
+                yield _missing_visible_response_message(saw_private_thinking)
                 return
-            raise OllamaError(f"Ollama streaming request failed: {exc}") from exc
-        finally:
-            if cancellation is not None and "close_response" in locals():
-                cancellation.unbind_closer(close_response)
+            if not saw_terminal:
+                # Treat a dropped terminal frame as truncation. The agent can then
+                # use its normal bounded continuation path instead of publishing a
+                # possibly partial response as complete.
+                yield Message(
+                    role="assistant",
+                    content="",
+                    finish_reason="length",
+                )
+            return
 
 
 def _looks_like_gpt_oss(value: str) -> bool:
     return bool(re.search(r"(?:^|[/_.:-])gpt-?oss(?:$|[/_.:-])", value.casefold()))
+
+
+def _finish_reason(data: dict[str, Any]) -> str | None:
+    value = data.get("done_reason")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _missing_visible_response_message(private_thinking: bool) -> Message:
+    """Report an empty model turn truthfully instead of failing the whole turn.
+
+    A local model that produces nothing after the bounded recovery attempt is a model
+    limitation, not a transport failure. Raising here destroyed the turn and surfaced an
+    error banner, which made the app look broken and lost the conversation. Saying so
+    plainly keeps the session usable and is honest about what happened: nothing ran and
+    nothing changed. The wording deliberately does not speculate about why.
+    """
+    if private_thinking:
+        detail = (
+            "The model produced only private reasoning and no visible answer, even "
+            "after one automatic retry."
+        )
+    else:
+        detail = (
+            "The model produced no visible answer, even after one automatic retry."
+        )
+    return Message(
+        role="assistant",
+        content=(
+            f"{detail} No tool ran and nothing was changed. Try rephrasing the "
+            "request, or select a different local model."
+        ),
+        finish_reason="stop",
+    )
 
 
 def _is_gpt_oss(model: str, metadata: dict[str, Any]) -> bool:

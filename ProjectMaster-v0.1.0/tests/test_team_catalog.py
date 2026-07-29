@@ -73,6 +73,8 @@ def test_catalog_deduplicates_physical_models_and_preserves_every_alias() -> Non
     assert atlas.size_bytes == 12_000
     assert atlas.modified_at == "2026-07-21T00:00:00Z"
     assert atlas.capabilities == frozenset({"completion", "tools", "thinking"})
+    assert atlas.automatic_eligible is False
+    assert atlas.curated_purposes == frozenset()
     assert atlas.details.parameter_size == "12B"
     assert atlas.details.quantization_level == "Q4_K_M"
     assert provider.show_calls == ["atlas:12b", "critic:7b"]
@@ -154,3 +156,24 @@ def test_catalog_caches_tags_and_inspection_metadata_until_refresh() -> None:
 
     catalog.load(refresh=True)
     assert provider.show_calls == ["lead", "lead"]
+
+
+def test_catalog_marks_only_exact_curated_manifest_as_automatic() -> None:
+    tag = "hf.co/TrevorJS/gemma-4-E4B-it-uncensored-GGUF:Q4_K_M"
+    provider = FakeCatalogProvider(
+        models=[
+            {
+                "name": tag,
+                "digest": (
+                    "bafec5176449e6589e4d3183bb9586e6862fc1e3146ff62a2995ef1e0babdf48"
+                ),
+                "size": 5_335_286_046,
+            }
+        ],
+        shows={tag: {"capabilities": ["completion", "tools"]}},
+    )
+
+    (model,) = OllamaModelCatalog(provider).load()
+
+    assert model.automatic_eligible is True
+    assert model.curated_purposes == frozenset({"chat", "team", "dream"})

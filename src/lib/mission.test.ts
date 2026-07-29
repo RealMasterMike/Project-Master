@@ -74,6 +74,8 @@ describe("deriveMissionState", () => {
         ...base,
         activity("synthesis_completed"),
         activity("council_completed"),
+        activity("lead_started"),
+        activity("delivery_completed"),
       ],
       false,
     );
@@ -102,15 +104,39 @@ describe("deriveMissionState", () => {
   it("collects tool events with success flags", () => {
     const state = deriveMissionState(
       [
-        activity("tool_completed", { tool: "workspace_read", ok: true }),
-        activity("tool_failed", { tool: "terminal", ok: false }),
+        activity("tool_completed", {
+          tool: "workspace_read",
+          ok: true,
+          outcome: "success",
+        }),
+        activity("tool_unavailable", {
+          tool: "terminal",
+          ok: false,
+          outcome: "unavailable",
+        }),
       ],
       true,
     );
     expect(state.toolEvents).toEqual([
-      { tool: "workspace_read", ok: true },
-      { tool: "terminal", ok: false },
+      { tool: "workspace_read", outcome: "success" },
+      { tool: "terminal", outcome: "unavailable" },
     ]);
+  });
+
+  it("does not call the mission delivered before the lead finishes", () => {
+    const councilReady = deriveMissionState(
+      [
+        activity("council_started"),
+        activity("synthesis_started"),
+        activity("synthesis_completed"),
+        activity("council_completed"),
+        activity("lead_started"),
+      ],
+      true,
+    );
+
+    expect(councilReady.phase).toBe("lead");
+    expect(councilReady.statusLine).toBe("Lead completing the response…");
   });
 
   it("never surfaces private reasoning fields, only bounded messages", () => {
